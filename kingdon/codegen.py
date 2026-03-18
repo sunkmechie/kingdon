@@ -146,7 +146,23 @@ def codegen_sw(x, y):
     if len(set((g % 2 for g in x.grades))) != 1:
         raise TypeError("x must be a versor (k-reflection) and thus either even or odd.")
     grade_x = max(x.grades)
-    return sum(((-1) ** (grade_x * g) * x * y.grade(g) * x.reverse()).grade(g) for g in y.grades)
+    from kingdon.polynomial import RationalPolynomial
+    _x_is_poly = all(isinstance(v, RationalPolynomial) for v in x.values())
+    if grade_x % 2 == 0 and 0 in x.grades and _x_is_poly:
+        # Even versor with scalar component and RationalPolynomial coefficients:
+        # use full GAmphetamine formula grade(a*b*~a + b*(1 - scalar_part(a*~a)), grade(b)).
+        # The correction term enables polynomial CSE cancellations (e.g. a0² terms cancel).
+        # For normalized versors, a*~a=1 so the correction vanishes mathematically.
+        # We only apply this for RationalPolynomial values to preserve standard numeric/sympy behavior.
+        from kingdon.multivector import MultiVector
+        alg = x.algebra
+        axar = x * x.reverse()
+        scalar_axar = axar.grade(0)
+        one_mv = MultiVector.fromkeysvalues(alg, (0,), [RationalPolynomial([[1]])])
+        correction_factor = one_mv - scalar_axar
+        return sum((x * y.grade(g) * x.reverse() + y.grade(g) * correction_factor).grade(g) for g in y.grades)
+    else:
+        return sum(((-1) ** (grade_x * g) * x * y.grade(g) * x.reverse()).grade(g) for g in y.grades)
 
 
 def codegen_cp(x, y):
@@ -315,7 +331,13 @@ def codegen_hitzer_inv(x, symbolic=False):
     elif d == 4:
         xconj = x.conjugate()
         x_xconj = x * xconj
-        num = xconj * (x_xconj - 2 * x_xconj.grade(3, 4))
+        x_xconj_high = x_xconj.grade(3, 4)
+        if x_xconj.grades == (0,):
+            # x*~x is a pure scalar: simplify num/denom by canceling the common x_xconj factor.
+            # num = xconj * x_xconj, denom = x_xconj^2 → simplified to num=xconj, denom=x_xconj.
+            num = xconj
+        else:
+            num = xconj * (x_xconj - 2 * x_xconj_high)
     elif d == 5:
         xconj = x.conjugate()
         x_xconj = x * xconj
@@ -594,6 +616,16 @@ def do_compile(codegen, *tapes):
     )
 
 
+def _count_muls_adds(funcstr: str) -> tuple:
+    """Count multiplication and addition/subtraction operations in a generated function string.
+
+    :return: Tuple of (muls, adds).
+    """
+    muls = funcstr.count('*')
+    adds = funcstr.count('+') + funcstr.count('-')
+    return muls, adds
+
+
 def func_builder(res_vals: defaultdict, *mvs, funcname: str) -> CodegenOutput:
     """
     Build a Python function for the product between given multivectors.
@@ -614,7 +646,9 @@ def func_builder(res_vals: defaultdict, *mvs, funcname: str) -> CodegenOutput:
     else:
         body = ''
         return_val = f'    return list()'
-    func_source = f'{header}\n{body}\n{return_val}'
+    func_source_no_doc = f'{header}\n{body}\n{return_val}'
+    muls, adds = _count_muls_adds(func_source_no_doc)
+    func_source = f'{header}\n    """{muls} muls / {adds} adds"""\n{body}\n{return_val}'
 
     # Dynamically build a function
     func_locals = {}
@@ -625,6 +659,167 @@ def func_builder(res_vals: defaultdict, *mvs, funcname: str) -> CodegenOutput:
     linecache.cache[funcname] = (len(func_source), None, func_source.splitlines(True), funcname)
     func = func_locals[funcname]
     return CodegenOutput(tuple(res_vals.keys()), func)
+
+
+def _lambdify_poly_cse(args_dict, poly_exprs, funcname):
+    """
+    Build a Python function using polynomial CSE (ported from polynomial.js).
+
+    :param args_dict: dict mapping arg name (str) to list of RationalPolynomial values.
+    :param poly_exprs: list of RationalPolynomial output expressions (unit denom assumed).
+    :param funcname: name for the generated function.
+    :return: compiled function with docstring containing op counts.
+    """
+    import copy
+    from kingdon.polynomial import poly_cse, _poly_format
+
+    # Extract raw polynomial args lists (deep copy to avoid mutation)
+    poly_args_list = [copy.deepcopy(e.numer.args) for e in poly_exprs]
+
+    # Collect all variable names from the expressions
+    all_vars = set()
+    for poly_args in poly_args_list:
+        for monomial in poly_args:
+            for f in monomial[1:]:
+                if isinstance(f, str):
+                    all_vars.add(f)
+
+    # Run polynomial CSE
+    prelude, simplified = poly_cse(poly_args_list, prot=None, iso=[2] + sorted(all_vars))
+
+    # Build argument unpacking lines
+    names = list(args_dict.keys())
+    body_lines = []
+    for name, values in args_dict.items():
+        var_names = []
+        for v in values:
+            numer_args = getattr(getattr(v, 'numer', None), 'args', None)
+            if numer_args == [[1]]:
+                var_names.append('_')
+            elif (numer_args and len(numer_args) == 1
+                  and len(numer_args[0]) == 2
+                  and numer_args[0][0] == 1):
+                var_names.append(str(numer_args[0][1]))
+            else:
+                var_names.append('_')
+        body_lines.append(f'    [{", ".join(var_names)}] = {name}')
+
+    for stmt in prelude:
+        body_lines.append(f'    {stmt}')
+
+    ret_exprs = [_poly_format(e) for e in simplified]
+    body_lines.append(f'    return [{", ".join(ret_exprs)},]')
+
+    header = f'def {funcname}({", ".join(names)}):'
+    func_source_no_doc = header + '\n' + '\n'.join(body_lines)
+    muls, adds = _count_muls_adds(func_source_no_doc)
+
+    func_source = '\n'.join([header, f'    """{muls} muls / {adds} adds"""']
+                            + body_lines)
+
+    func_locals = {}
+    c = compile(func_source, funcname, 'exec')
+    exec(c, {'builtins': builtins, 'range': range}, func_locals)
+    linecache.cache[funcname] = (
+        len(func_source), None, func_source.splitlines(True), funcname)
+    return func_locals[funcname]
+
+
+def _lambdify_poly_cse_rational(args_dict, poly_exprs, common_denom, funcname):
+    """
+    Build a Python function for RationalPolynomial expressions sharing a common denominator.
+
+    All non-constant expressions in poly_exprs have denominator == common_denom.
+    Polynomial CSE is applied to the numerators and denominator together,
+    and the generated function divides the numerator results by the denominator.
+
+    :param args_dict: dict mapping arg name (str) to list of RationalPolynomial values.
+    :param poly_exprs: list of RationalPolynomial output expressions.
+    :param common_denom: Polynomial — the shared denominator for non-unit expressions.
+    :param funcname: name for the generated function.
+    :return: compiled function with docstring containing op counts.
+    """
+    import copy
+    from kingdon.polynomial import poly_cse, _poly_format, Polynomial as _Poly
+
+    _unit = _Poly([[1]])
+
+    # Build args list: numerators of all exprs + the common denominator as last entry
+    all_args_list = [copy.deepcopy(e.numer.args) for e in poly_exprs]
+    all_args_list.append(copy.deepcopy(common_denom.args))
+
+    # Collect all variable names
+    all_vars = set()
+    for poly_args in all_args_list:
+        for monomial in poly_args:
+            for f in monomial[1:]:
+                if isinstance(f, str):
+                    all_vars.add(f)
+
+    # Run polynomial CSE on numerators + denominator together
+    prelude, simplified = poly_cse(all_args_list, prot=None, iso=[2] + sorted(all_vars))
+
+    numer_simplified = simplified[:-1]
+    denom_simplified = simplified[-1]
+
+    # Build argument unpacking lines
+    names = list(args_dict.keys())
+    body_lines = []
+    for name, values in args_dict.items():
+        var_names = []
+        for v in values:
+            numer_args = getattr(getattr(v, 'numer', None), 'args', None)
+            if numer_args == [[1]]:
+                var_names.append('_')
+            elif (numer_args and len(numer_args) == 1
+                  and len(numer_args[0]) == 2
+                  and numer_args[0][0] == 1):
+                var_names.append(str(numer_args[0][1]))
+            else:
+                var_names.append('_')
+        body_lines.append(f'    [{", ".join(var_names)}] = {name}')
+
+    for stmt in prelude:
+        body_lines.append(f'    {stmt}')
+
+    denom_expr = _poly_format(denom_simplified)
+    # If more than one expression uses the denominator, assign it to a local variable
+    # to avoid recomputing it for each return component.
+    non_unit_count = sum(1 for e in poly_exprs if e.denom != _unit)
+    if non_unit_count > 1:
+        # Pick a name that doesn't clash with existing prelude vars (t0, t1, ...)
+        prelude_names = {stmt.split('=')[0].strip() for stmt in prelude}
+        denom_var = '_d'
+        while denom_var in prelude_names:
+            denom_var = '_d' + denom_var
+        body_lines.append(f'    {denom_var}={denom_expr}')
+        denom_ref = denom_var
+    else:
+        denom_ref = denom_expr
+
+    ret_parts = []
+    for e, simp in zip(poly_exprs, numer_simplified):
+        numer_fmt = _poly_format(simp)
+        if e.denom == _unit:
+            ret_parts.append(numer_fmt)
+        else:
+            ret_parts.append(f'({numer_fmt})/({denom_ref})')
+
+    body_lines.append(f'    return [{", ".join(ret_parts)},]')
+
+    header = f'def {funcname}({", ".join(names)}):'
+    func_source_no_doc = header + '\n' + '\n'.join(body_lines)
+    muls, adds = _count_muls_adds(func_source_no_doc)
+
+    func_source = '\n'.join([header, f'    """{muls} muls / {adds} adds"""']
+                            + body_lines)
+
+    func_locals = {}
+    c = compile(func_source, funcname, 'exec')
+    exec(c, {'builtins': builtins, 'range': range}, func_locals)
+    linecache.cache[funcname] = (
+        len(func_source), None, func_source.splitlines(True), funcname)
+    return func_locals[funcname]
 
 
 def lambdify(args: dict, exprs: list, funcname: str, dependencies: tuple = None, printer=LambdaPrinter, dummify=False, cse=False):
@@ -669,6 +864,25 @@ def lambdify(args: dict, exprs: list, funcname: str, dependencies: tuple = None,
         This typically greatly improves performance and reduces numba's initialization time.
     :return: Function that represents that can be used to calculate the values of exprs.
     """
+    # Try polynomial CSE before sympy conversion (faster and more targeted)
+    if cse and dependencies is None and exprs:
+        try:
+            from kingdon.polynomial import RationalPolynomial, Polynomial as _Poly
+            _unit = _Poly([[1]])
+            if all(isinstance(e, RationalPolynomial) for e in exprs):
+                if all(e.denom == _unit for e in exprs):
+                    return _lambdify_poly_cse(args, exprs, funcname)
+                else:
+                    # Check if all non-constant expressions share a common denominator.
+                    # If so, factor it out: apply poly CSE to numerators, divide by denom at runtime.
+                    non_unit = [e for e in exprs if e.denom != _unit]
+                    if non_unit:
+                        first_denom = non_unit[0].denom
+                        if all(e.denom == first_denom for e in non_unit):
+                            return _lambdify_poly_cse_rational(args, exprs, first_denom, funcname)
+        except Exception:
+            pass  # fall through to sympy path
+
     if printer is LambdaPrinter:
         printer = LambdaPrinter(
             {'fully_qualified_modules': False, 'inline': True,
@@ -791,6 +1005,9 @@ class KingdonPrinter:
 
         funclines = [funcsig]
         funclines.extend(['    ' + line for line in funcbody])
+        funcstr = '\n'.join(funclines) + '\n'
+        muls, adds = _count_muls_adds(funcstr)
+        funclines.insert(1, f'    """{muls} muls / {adds} adds"""')
 
         return '\n'.join(funclines) + '\n'
 
@@ -809,6 +1026,9 @@ class KingdonPrinter:
         for i, arg in enumerate(args):
             if iterable(arg):
                 s, expr = self._preprocess(arg, expr)
+            elif hasattr(arg, 'free_symbols') and not arg.free_symbols:
+                # sympy constant (no free symbols): use _ as placeholder in unpacking
+                s = '_'
             elif hasattr(arg, 'name'):
                 s = arg.name
             elif hasattr(arg, 'is_symbol') and arg.is_symbol:
