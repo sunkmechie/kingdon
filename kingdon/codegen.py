@@ -145,24 +145,11 @@ def codegen_sw(x, y):
     """
     if len(set((g % 2 for g in x.grades))) != 1:
         raise TypeError("x must be a versor (k-reflection) and thus either even or odd.")
-    grade_x = max(x.grades)
-    if grade_x % 2 == 0 and 0 in x.grades:
-        from kingdon.polynomial import RationalPolynomial
-        if not all(isinstance(v, RationalPolynomial) for v in x.values()):
-            return sum((x * y.grade(g) * x.reverse()).grade(g) for g in y.grades)
-        # Even versor with scalar component and RationalPolynomial coefficients:
-        # use full GAmphetamine formula grade(a*b*~a + b*(1 - scalar_part(a*~a)), grade(b)).
-        # The correction term enables polynomial CSE cancellations (e.g. a0² terms cancel).
-        # For normalized versors, a*~a=1 so the correction vanishes mathematically.
-        from kingdon.multivector import MultiVector
-        alg = x.algebra
-        axar = x * x.reverse()
-        scalar_axar = axar.grade(0)
-        one_mv = MultiVector.fromkeysvalues(alg, (0,), [RationalPolynomial([[1]])])
-        correction_factor = one_mv - scalar_axar
-        return sum((x * y.grade(g) * x.reverse() + y.grade(g) * correction_factor).grade(g) for g in y.grades)
-    else:
-        return sum(((-1) ** (grade_x * g) * x * y.grade(g) * x.reverse()).grade(g) for g in y.grades)
+    if max(x.grades) % 2 == 1:  # odd versor: grade(x * involute(y) * ~x, grade(y))
+        return sum((x * y.grade(g).involute() * x.reverse()).grade(g) for g in y.grades)
+    # even versor: grade(x*y*~x + y*(1 - grade(x*~x, 0)), grade(y))
+    axar_scalar = (x * x.reverse()).grade(0)
+    return sum((x * y.grade(g) * x.reverse() + y.grade(g) * (1 - axar_scalar)).grade(g) for g in y.grades)
 
 
 def codegen_cp(x, y):
@@ -300,7 +287,14 @@ class LambdifyInput(NamedTuple):
 
 def codegen_inv(y, symbolic=False):
     alg = y.algebra
-    if alg.d < 6:
+    # If y * ~y is a scalar, use the simple blade inverse ~y / (y * ~y).
+    # This matches GAmphetamine's check: if (gradeOf(a*~a) == 0) return gp(reverse(a), inv(sq))
+    # and avoids producing unsimplified rational polynomials like (y * s) / s^2.
+    ynorm = y * y.reverse()
+    if ynorm.grades == (0,):
+        num = y.reverse()
+        denom = ynorm
+    elif alg.d < 6:
         num, denom = codegen_hitzer_inv(y, symbolic=True)
     else:
         num, denom = codegen_shirokov_inv(y, symbolic=True)
@@ -331,13 +325,7 @@ def codegen_hitzer_inv(x, symbolic=False):
     elif d == 4:
         xconj = x.conjugate()
         x_xconj = x * xconj
-        x_xconj_high = x_xconj.grade(3, 4)
-        if x_xconj.grades == (0,):
-            # x*~x is a pure scalar: simplify num/denom by canceling the common x_xconj factor.
-            # num = xconj * x_xconj, denom = x_xconj^2 → simplified to num=xconj, denom=x_xconj.
-            num = xconj
-        else:
-            num = xconj * (x_xconj - 2 * x_xconj_high)
+        num = xconj * (x_xconj - 2 * x_xconj.grade(3, 4))
     elif d == 5:
         xconj = x.conjugate()
         x_xconj = x * xconj

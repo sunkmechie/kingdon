@@ -384,7 +384,7 @@ def test_rp_three_points(pga3d, pga3d_no_cse):
 # ---------------------------------------------------------------------------
 
 def test_project_point_on_plane(pga3d, pga3d_no_cse):
-    """3DPGA project point on plane: CSE 18 muls/12 adds vs no-CSE 51 muls/22 adds.
+    """3DPGA project point on plane: CSE 18 muls/12 adds vs no-CSE 51 muls/20 adds.
 
     Expression: (a | b) / b  where a is a normalized point and b is a plane.
     """
@@ -403,7 +403,7 @@ def test_project_point_on_plane(pga3d, pga3d_no_cse):
     _, func_nc = do_codegen(codegen_proj_point_plane, a_nc, b_nc)
     muls_nc, adds_nc = get_op_counts(func_nc)
     assert muls_nc == 51
-    assert adds_nc == 22
+    assert adds_nc == 20
 
     check_same_result(func_cse, func_nc, _NUM_POINT, _NUM_VEC)
 

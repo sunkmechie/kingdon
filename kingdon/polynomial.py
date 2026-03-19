@@ -21,19 +21,6 @@ def _gcd(a, b):
     return a or 1
 
 
-def _poly_add_raw(a, b):
-    """Add two raw polynomial args lists (each is a list of monomials, or 0)."""
-    if a == 0: return b
-    if b == 0: return a
-    pa = Polynomial(a) + Polynomial(b)
-    return pa.args if pa.args else 0
-
-
-def _poly_neg_raw(a):
-    """Negate a raw polynomial args list."""
-    if a == 0: return 0
-    return [[-m[0], *m[1:]] for m in a]
-
 
 def _poly_format(poly_args):
     """Format a raw polynomial args list (or 0) to a Python code string."""
@@ -144,7 +131,9 @@ def _find_shared_sums(expr, iso_vars, prelude, start_count=0, sum_map=None):
 
         if (sum_map is not None and len(norm) == 2
                 and len(norm[0]) == 2 and len(norm[1]) == 2):
-            sum_map[norm[0][1]] = {'tn': sn, 'offset': norm[1][1]}
+            # offset_sign: +1 for difference (t=a-b → a=t+b), -1 for sum (t=a+b → a=t-b)
+            offset_sign = 1 if norm[1][0] < 0 else -1
+            sum_map[norm[0][1]] = {'tn': sn, 'offset': norm[1][1], 'offset_sign': offset_sign}
 
         for occ in valid:
             for i in occ['idx']:
@@ -242,6 +231,12 @@ def _isolate(expr, iso_list):
                             idx = t.index(cf)
                             if idx == 0:
                                 t[idx] = 1
+                            else:
+                                t.pop(idx)
+                        elif isinstance(cf, (int, float)) and -cf in t:
+                            idx = t.index(-cf)
+                            if idx == 0:
+                                t[idx] = -1
                             else:
                                 t.pop(idx)
 
@@ -351,18 +346,19 @@ def _substitute_extracted(expr, sum_map):
             info = sum_map[t[sub_idx]]
             coeff = t[0]
             rest = t[1:sub_idx] + t[sub_idx+1:]
+            # offset_sign: +1 for difference (t=a-b → a=t+b, both positive)
+            #              -1 for sum (t=a+b → a=t-b, offset is negated)
+            offset_sign = info.get('offset_sign', 1)
             new_terms.append([coeff, *sorted(rest + [info['tn']])])
-            new_terms.append([coeff, *sorted(rest + [info['offset']])])
+            new_terms.append([coeff * offset_sign, *sorted(rest + [info['offset']])])
         if not changed:
             continue
-        simplified = 0
-        for t in new_terms:
-            simplified = _poly_add_raw(simplified, [t])
-        if simplified == 0:
+        simplified = sum((Polynomial([t]) for t in new_terms), Polynomial([]))
+        if not simplified:
             e.clear()
-        elif isinstance(simplified, list):
+        else:
             e.clear()
-            e.extend(simplified)
+            e.extend(simplified.args)
 
 
 def _detect_linear_deps(expr):
@@ -372,24 +368,17 @@ def _detect_linear_deps(expr):
         if not isinstance(e, list):
             norm.append(e)
         else:
-            p = 0
-            def collect(t, _p=[0]):
-                _p[0] = _poly_add_raw(_p[0], [t])
-            collector = [0]
-            def mk_collector():
-                acc = [0]
-                def fn(t):
-                    acc[0] = _poly_add_raw(acc[0], [t])
-                return acc, fn
-            acc, fn = mk_collector()
+            acc = [Polynomial([])]
+            def fn(t, _acc=acc):
+                _acc[0] = _acc[0] + Polynomial([t])
             _walk_terms(e, fn)
             norm.append(acc[0])
 
     heaviest, max_weight = -1, 0
     for i, n in enumerate(norm):
-        if not isinstance(n, list):
+        if not isinstance(n, Polynomial):
             continue
-        w = sum(len(t) for t in n)
+        w = sum(len(t) for t in n.args)
         if w > max_weight:
             max_weight = w
             heaviest = i
@@ -399,14 +388,14 @@ def _detect_linear_deps(expr):
 
     other_vars = set()
     for i, n in enumerate(norm):
-        if i == heaviest or not isinstance(n, list):
+        if i == heaviest or not isinstance(n, Polynomial):
             continue
-        for t in n:
+        for t in n.args:
             for j in range(1, len(t)):
                 other_vars.add(t[j])
 
     exclusive_vars = set()
-    for t in norm[heaviest]:
+    for t in norm[heaviest].args:
         for j in range(1, len(t)):
             if t[j] not in other_vars:
                 exclusive_vars.add(t[j])
@@ -419,17 +408,16 @@ def _detect_linear_deps(expr):
 
     for cv in exclusive_vars:
         for oi in range(len(norm)):
-            if oi == heaviest or oi in used_comps or not isinstance(norm[oi], list):
+            if oi == heaviest or oi in used_comps or not isinstance(norm[oi], Polynomial):
                 continue
-            prod_p = Polynomial(norm[oi]) * Polynomial([[1, cv]])
-            prod_args = prod_p.args if prod_p.args else 0
+            prod_p = norm[oi] * Polynomial([[1, cv]])
 
-            r_plus = _poly_add_raw(remainder, prod_args)
-            r_minus = _poly_add_raw(remainder, _poly_neg_raw(prod_args))
+            r_plus = remainder + prod_p
+            r_minus = remainder - prod_p
 
-            cur_len = len(remainder) if isinstance(remainder, list) else (0 if remainder == 0 else 1)
-            plus_len = len(r_plus) if isinstance(r_plus, list) else (0 if r_plus == 0 else 1)
-            minus_len = len(r_minus) if isinstance(r_minus, list) else (0 if r_minus == 0 else 1)
+            cur_len = len(remainder)
+            plus_len = len(r_plus)
+            minus_len = len(r_minus)
 
             if plus_len < cur_len:
                 remainder = r_plus
