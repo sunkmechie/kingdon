@@ -56,82 +56,63 @@ def make_even(alg, prefix='a'):
 
 
 def make_normalized_point(alg, prefix='b'):
-    """Trivector with symbolic x,y,z and w=1 (normalized point).
-
-    In 3DPGA: e032=b0, e013=b1, e021=b2, e123=1.
-    Binary keys using Algebra.fromname('3DPGA'): e123=7, e021=11, e013=13, e032=14.
-    """
-    keys = (7, 11, 13, 14)
-    vals = [
-        one(),                                    # e123 = 1 (normalized)
-        rp(f'{prefix}{alg.bin2canon[11][1:]}'),   # e021
-        rp(f'{prefix}{alg.bin2canon[13][1:]}'),   # e013
-        rp(f'{prefix}{alg.bin2canon[14][1:]}'),   # e032
-    ]
+    """Trivector with symbolic x,y,z and w=1 (normalized point)."""
+    e123 = alg.canon2bin['e123']
+    keys = tuple(sorted(alg.indices_for_grade(3)))
+    vals = [one() if k == e123 else rp(f'{prefix}{alg.bin2canon[k][1:]}') for k in keys]
     return MultiVector.fromkeysvalues(alg, keys, vals)
 
 
 def make_direction(alg, prefix='b'):
     """Trivector with symbolic x,y,z only (direction, no homogeneous component)."""
-    keys = (11, 13, 14)
+    e123 = alg.canon2bin['e123']
+    keys = tuple(sorted(k for k in alg.indices_for_grade(3) if k != e123))
     vals = [rp(f'{prefix}{alg.bin2canon[k][1:]}') for k in keys]
     return MultiVector.fromkeysvalues(alg, keys, vals)
 
 
 def make_origin(alg):
     """Trivector with only e123=1 (the origin point)."""
-    return MultiVector.fromkeysvalues(alg, (7,), [one()])
+    e123 = alg.canon2bin['e123']
+    return MultiVector.fromkeysvalues(alg, (e123,), [one()])
 
 
 def make_pure_e032(alg):
     """Single e032 blade with value 1."""
-    return MultiVector.fromkeysvalues(alg, (14,), [one()])
+    e032 = alg.canon2bin['e032']
+    return MultiVector.fromkeysvalues(alg, (e032,), [one()])
 
 
 def make_rotation(alg, prefix='a'):
-    """Rotation rotor: scalar=1, e12=x, e31=y, e23=z.
-
-    In 3DPGA: the rotation bivectors are e12(3), e31(5), e23(6).
-    This matches GAmphetamine Element.even("1","a0","a1","a2","0","0","0","0").
-    """
-    keys = (0, 3, 5, 6)
-    vals = [
-        one(),
-        rp(f'{prefix}{alg.bin2canon[3][1:]}'),   # e12
-        rp(f'{prefix}{alg.bin2canon[5][1:]}'),   # e31
-        rp(f'{prefix}{alg.bin2canon[6][1:]}'),   # e23
-    ]
+    """Rotation rotor: scalar=1, e12=x, e31=y, e23=z."""
+    e_s = alg.canon2bin['e']
+    e12 = alg.canon2bin['e12']
+    e31 = alg.canon2bin['e31']
+    e23 = alg.canon2bin['e23']
+    keys = (e_s, e12, e31, e23)
+    vals = [one()] + [rp(f'{prefix}{alg.bin2canon[k][1:]}') for k in (e12, e31, e23)]
     return MultiVector.fromkeysvalues(alg, keys, vals)
 
 
 def make_translation(alg, prefix='a'):
-    """Translation motor: scalar=1, e01=x, e02=y, e03=z.
-
-    In 3DPGA: the ideal (null) bivectors are e01(9), e02(10), e03(12).
-    This matches GAmphetamine Element.even("1","0","0","0","a0","a1","a2","0").
-    """
-    keys = (0, 9, 10, 12)
-    vals = [
-        one(),
-        rp(f'{prefix}{alg.bin2canon[9][1:]}'),   # e01
-        rp(f'{prefix}{alg.bin2canon[10][1:]}'),  # e02
-        rp(f'{prefix}{alg.bin2canon[12][1:]}'),  # e03
-    ]
+    """Translation motor: scalar=1, e01=x, e02=y, e03=z."""
+    e_s = alg.canon2bin['e']
+    e01 = alg.canon2bin['e01']
+    e02 = alg.canon2bin['e02']
+    e03 = alg.canon2bin['e03']
+    keys = (e_s, e01, e02, e03)
+    vals = [one()] + [rp(f'{prefix}{alg.bin2canon[k][1:]}') for k in (e01, e02, e03)]
     return MultiVector.fromkeysvalues(alg, keys, vals)
 
 
 def make_vector(alg, prefix='b'):
     """Grade-1 vector (plane in 3DPGA) with all symbolic RP coefficients."""
-    keys = tuple(alg.indices_for_grade(1))
-    vals = [rp(f'{prefix}{alg.bin2canon[k][1:]}') for k in keys]
-    return MultiVector.fromkeysvalues(alg, keys, vals)
+    return alg.vector(name=prefix, symbolcls=RationalPolynomial.fromname)
 
 
 def make_bivector(alg, prefix='b'):
     """Grade-2 bivector (line in 3DPGA) with all symbolic RP coefficients."""
-    keys = tuple(alg.indices_for_grade(2))
-    vals = [rp(f'{prefix}{alg.bin2canon[k][1:]}') for k in keys]
-    return MultiVector.fromkeysvalues(alg, keys, vals)
+    return alg.bivector(name=prefix, symbolcls=RationalPolynomial.fromname)
 
 
 # ---------------------------------------------------------------------------

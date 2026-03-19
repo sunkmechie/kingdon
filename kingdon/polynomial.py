@@ -1,8 +1,7 @@
-import copy
 import itertools
-from dataclasses import dataclass, field
+import math
+from collections import defaultdict
 from fractions import Fraction
-from typing import List
 
 from sympy import Mul, Add, Symbol, RealNumber
 
@@ -12,13 +11,6 @@ from kingdon.codegen import power_supply
 # ---------------------------------------------------------------------------
 # Polynomial CSE helpers (ported from polynomial.js)
 # ---------------------------------------------------------------------------
-
-def _gcd(a, b):
-    """GCD of two non-negative integers."""
-    a, b = abs(int(a)), abs(int(b))
-    while b:
-        a, b = b, a % b
-    return a or 1
 
 
 
@@ -91,7 +83,7 @@ def _find_shared_sums(expr, iso_vars, prelude, start_count=0, sum_map=None):
 
                     g = abs(sub[0][0])
                     for i in range(1, len(sub)):
-                        g = _gcd(g, abs(sub[i][0]))
+                        g = math.gcd(abs(int(g)), abs(int(sub[i][0])))
 
                     norm = [[t[0] // g if isinstance(t[0], int) else t[0] / g, *t[1:]]
                             for t in sub]
@@ -119,7 +111,7 @@ def _find_shared_sums(expr, iso_vars, prelude, start_count=0, sum_map=None):
     replacements = []
     for cand in cands:
         valid = [o for o in cand['occs']
-                 if not any(f"{o['comp']}:{i}" in used for i in o['idx'])]
+                 if not any((o['comp'], i) in used for i in o['idx'])]
         vc = set(o['comp'] for o in valid)
         if len(vc) < 2:
             continue
@@ -137,18 +129,22 @@ def _find_shared_sums(expr, iso_vars, prelude, start_count=0, sum_map=None):
 
         for occ in valid:
             for i in occ['idx']:
-                used.add(f"{occ['comp']}:{i}")
+                used.add((occ['comp'], i))
             replacements.append({
                 'comp': occ['comp'],
                 'indices': occ['idx'],
                 'term': [occ['gcd'] * occ['sign'], occ['v'], sn]
             })
 
+    repls_by_comp = defaultdict(list)
+    for r in replacements:
+        repls_by_comp[r['comp']].append(r)
+
     for ci in range(len(expr)):
         e = expr[ci]
         if not isinstance(e, list):
             continue
-        repls = [r for r in replacements if r['comp'] == ci]
+        repls = repls_by_comp[ci]
         if not repls:
             continue
         remove_set = set()
@@ -260,13 +256,13 @@ def _isolate(expr, iso_list):
             e.extend(terms_without_p + [new_term])
 
 
-def _walk_terms(expr, fn):
-    """Walk all leaf terms in a (possibly nested) polynomial structure."""
+def _walk_terms(expr):
+    """Yield all leaf terms in a (possibly nested) polynomial structure."""
     for term in expr:
         if term and isinstance(term[-1], list):
-            _walk_terms(term[-1], fn)
+            yield from _walk_terms(term[-1])
         else:
-            fn(term)
+            yield term
 
 
 def _find_shared_products(expr, prot, prelude):
@@ -285,14 +281,15 @@ def _find_shared_products(expr, prot, prelude):
                     continue
                 if ti in prot_set or tj in prot_set:
                     continue
-                key = str(ti) + '*' + str(tj)
+                key = (ti, tj)
                 if key not in seen:
                     seen.add(key)
                     prods[key] = prods.get(key, 0) + 1
 
     for e in expr:
         if isinstance(e, list):
-            _walk_terms(e, count_pairs)
+            for term in _walk_terms(e):
+                count_pairs(term)
 
     prod_list = [k for k, v in prods.items() if v > 1]
 
@@ -308,9 +305,8 @@ def _find_shared_products(expr, prot, prelude):
                 if '(' in str(ti) or '(' in str(tj):
                     j += 1
                     continue
-                key = str(ti) + '*' + str(tj)
-                if prods.get(key, 0) > 1:
-                    combined = key.replace('*', '')
+                if prods.get((ti, tj), 0) > 1:
+                    combined = f'{ti}{tj}'
                     term[i] = combined
                     term.pop(j)
                 else:
@@ -319,11 +315,12 @@ def _find_shared_products(expr, prot, prelude):
 
     for e in expr:
         if isinstance(e, list):
-            _walk_terms(e, substitute_pairs)
+            for term in _walk_terms(e):
+                substitute_pairs(term)
 
     for k in prod_list:
-        combined = k.replace('*', '')
-        prelude.append(combined + '=' + k)
+        combined = f'{k[0]}{k[1]}'
+        prelude.append(f'{combined}={k[0]}*{k[1]}')
 
 
 def _substitute_extracted(expr, sum_map):
@@ -368,11 +365,7 @@ def _detect_linear_deps(expr):
         if not isinstance(e, list):
             norm.append(e)
         else:
-            acc = [Polynomial([])]
-            def fn(t, _acc=acc):
-                _acc[0] = _acc[0] + Polynomial([t])
-            _walk_terms(e, fn)
-            norm.append(acc[0])
+            norm.append(sum((Polynomial([t]) for t in _walk_terms(e)), Polynomial([])))
 
     heaviest, max_weight = -1, 0
     for i, n in enumerate(norm):
@@ -450,6 +443,10 @@ def poly_cse(expr, prot=None, iso=None):
     if not isinstance(expr, list):
         return [], expr
 
+    # Shallow-copy the outer list and each component so in-place mutations
+    # in the CSE phases don't affect the caller's data.
+    expr = [list(e) if isinstance(e, list) else e for e in expr]
+
     prelude = []
     iso_vars = [x for x in (iso or []) if isinstance(x, str)]
     iso_nums = [x for x in (iso or []) if not isinstance(x, str)]
@@ -458,7 +455,7 @@ def poly_cse(expr, prot=None, iso=None):
     sum_map = {}
     has_mixed = _find_shared_sums(expr, iso_vars, prelude, 0, sum_map)
 
-    # Phase 4: Substitute and find more shared structure
+    # Phase 2: Substitute extracted sums and find more shared structure
     if has_mixed and sum_map:
         _substitute_extracted(expr, sum_map)
         t_vars = list(set(v['tn'] for v in sum_map.values()))
@@ -469,10 +466,10 @@ def poly_cse(expr, prot=None, iso=None):
         if sum_map2:
             _substitute_extracted(expr, sum_map2)
 
-    # Phase 5: Detect linear dependencies (before isolation)
+    # Phase 3: Detect linear dependencies (before isolation)
     dep = _detect_linear_deps(expr) if has_mixed else None
 
-    # Phase 2: Isolate variables
+    # Phase 4: Isolate variables
     iso_list = (list(reversed(iso_vars)) + iso_nums if has_mixed
                 else list(prot or []) + list(reversed(iso_vars)) + iso_nums)
     _isolate(expr, iso_list)
@@ -486,7 +483,7 @@ def poly_cse(expr, prot=None, iso=None):
         expr[dep['heaviest']] = [[-d['sign'], d['cv'], 'u' + str(d['comp'])]
                                   for d in dep['deps']]
 
-    # Phase 3: Find shared products
+    # Phase 5: Find shared products
     _find_shared_products(expr, prot, prelude)
 
     return prelude, expr
@@ -534,9 +531,7 @@ class mathstr(str):
         return self.__class__(f'({self}**{power})')
 
 
-@dataclass
 class Polynomial:
-    args: List[list] = field(init=False)
 
     def __init__(self, coeff):
         if isinstance(coeff, self.__class__):
@@ -671,30 +666,20 @@ class Polynomial:
         return bool(self.args)
 
 
-@dataclass
 class RationalPolynomial:
-    numer: Polynomial = field(init=False)
-    denom: Polynomial = field(init=False)
-
     def __init__(self, numer, denom=None):
         if isinstance(numer, self.__class__):
-            numer = numer.numer
-            denom = numer.denom
+            orig = numer
+            numer = orig.numer
+            denom = orig.denom
         elif isinstance(numer, (list, tuple)):
             numer = Polynomial(numer)
         if denom is None:
-            denom = Polynomial([[1]])
+            denom = _UNIT_POLY
         elif isinstance(denom, (list, tuple)):
             denom = Polynomial(denom)
         self.numer = numer
         self.denom = denom
-
-        # elif isinstance(coeff, Polynomial):
-        #     self.args = [coeff, Polynomial([[1]])]
-        # elif isinstance(coeff, (list, tuple)):
-        #     self.args = [Polynomial(coeff), Polynomial([[1]])]
-        # else:
-        #     raise NotImplementedError
 
     @classmethod
     def fromname(cls, name):
@@ -809,3 +794,7 @@ class RationalPolynomial:
 
     def __bool__(self):
         return self.numer.__bool__()
+
+
+# Module-level unit polynomial constant — avoids repeated allocation.
+_UNIT_POLY = Polynomial([[1]])

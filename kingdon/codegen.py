@@ -145,11 +145,12 @@ def codegen_sw(x, y):
     """
     if len(set((g % 2 for g in x.grades))) != 1:
         raise TypeError("x must be a versor (k-reflection) and thus either even or odd.")
+    xr = x.reverse()
     if max(x.grades) % 2 == 1:  # odd versor: grade(x * involute(y) * ~x, grade(y))
-        return sum((x * y.grade(g).involute() * x.reverse()).grade(g) for g in y.grades)
+        return sum((x * y.grade(g).involute() * xr).grade(g) for g in y.grades)
     # even versor: grade(x*y*~x + y*(1 - grade(x*~x, 0)), grade(y))
-    axar_scalar = (x * x.reverse()).grade(0)
-    return sum((x * y.grade(g) * x.reverse() + y.grade(g) * (1 - axar_scalar)).grade(g) for g in y.grades)
+    axar_scalar = (x * xr).grade(0)
+    return sum((x * y.grade(g) * xr + y.grade(g) * (1 - axar_scalar)).grade(g) for g in y.grades)
 
 
 def codegen_cp(x, y):
@@ -290,9 +291,10 @@ def codegen_inv(y, symbolic=False):
     # If y * ~y is a scalar, use the simple blade inverse ~y / (y * ~y).
     # This matches GAmphetamine's check: if (gradeOf(a*~a) == 0) return gp(reverse(a), inv(sq))
     # and avoids producing unsimplified rational polynomials like (y * s) / s^2.
-    ynorm = y * y.reverse()
+    yr = y.reverse()
+    ynorm = y * yr
     if ynorm.grades == (0,):
-        num = y.reverse()
+        num = yr
         denom = ynorm
     elif alg.d < 6:
         num, denom = codegen_hitzer_inv(y, symbolic=True)
@@ -614,6 +616,27 @@ def _count_muls_adds(funcstr: str) -> tuple:
     return muls, adds
 
 
+def _build_and_cache_func(header, body_lines, funcname, namespace=None):
+    """Build a function from header + body lines, insert op-count docstring, compile, exec, cache.
+
+    :param header: The `def funcname(...):` line.
+    :param body_lines: List of indented body lines (without the docstring).
+    :param funcname: Name used as the linecache key.
+    :param namespace: Execution namespace dict. Defaults to {'builtins': builtins, 'range': range}.
+    :return: The compiled function object.
+    """
+    if namespace is None:
+        namespace = {'builtins': builtins, 'range': range}
+    func_source_no_doc = header + '\n' + '\n'.join(body_lines)
+    muls, adds = _count_muls_adds(func_source_no_doc)
+    all_lines = [header, f'    """{muls} muls / {adds} adds"""'] + body_lines
+    func_source = '\n'.join(all_lines)
+    func_locals = {}
+    exec(compile(func_source, funcname, 'exec'), namespace, func_locals)
+    linecache.cache[funcname] = (len(func_source), None, func_source.splitlines(True), funcname)
+    return func_locals[funcname]
+
+
 def func_builder(res_vals: defaultdict, *mvs, funcname: str) -> CodegenOutput:
     """
     Build a Python function for the product between given multivectors.
@@ -626,35 +649,15 @@ def func_builder(res_vals: defaultdict, *mvs, funcname: str) -> CodegenOutput:
     """
     args = string.ascii_uppercase[:len(mvs)]
     header = f'def {funcname}({", ".join(args)}):'
+    body_lines = []
     if res_vals:
-        body = ''
         for mv, arg in zip(mvs, args):
-            body += f'    [{", ".join(str(v) for v in mv.values())}] = {arg}\n'
-        return_val = f'    return [{", ".join(res_vals.values())},]'
+            body_lines.append(f'    [{", ".join(str(v) for v in mv.values())}] = {arg}')
+        body_lines.append(f'    return [{", ".join(res_vals.values())},]')
     else:
-        body = ''
-        return_val = f'    return list()'
-    func_source_no_doc = f'{header}\n{body}\n{return_val}'
-    muls, adds = _count_muls_adds(func_source_no_doc)
-    func_source = f'{header}\n    """{muls} muls / {adds} adds"""\n{body}\n{return_val}'
-
-    # Dynamically build a function
-    func_locals = {}
-    c = compile(func_source, funcname, 'exec')
-    exec(c, {}, func_locals)
-
-    # Add the generated code to linecache such that it is inspect-safe.
-    linecache.cache[funcname] = (len(func_source), None, func_source.splitlines(True), funcname)
-    func = func_locals[funcname]
+        body_lines.append(f'    return list()')
+    func = _build_and_cache_func(header, body_lines, funcname, namespace={})
     return CodegenOutput(tuple(res_vals.keys()), func)
-
-
-def _exec_and_cache(func_source, funcname):
-    """Compile, exec, and register func_source in linecache; return the function."""
-    func_locals = {}
-    exec(compile(func_source, funcname, 'exec'), {'builtins': builtins, 'range': range}, func_locals)
-    linecache.cache[funcname] = (len(func_source), None, func_source.splitlines(True), funcname)
-    return func_locals[funcname]
 
 
 def _lambdify_poly_cse(args_dict, poly_exprs, funcname, common_denom=None):
@@ -671,15 +674,14 @@ def _lambdify_poly_cse(args_dict, poly_exprs, funcname, common_denom=None):
     :param common_denom: optional Polynomial shared by all non-unit-denominator expressions.
     :return: compiled function with docstring containing op counts.
     """
-    import copy
-    from kingdon.polynomial import poly_cse, _poly_format, Polynomial as _Poly
 
-    _unit = _Poly([[1]])
+    from kingdon.polynomial import poly_cse, _poly_format, _UNIT_POLY
 
-    # Build CSE input: numerators of all exprs, plus the common denominator as last entry
-    poly_args_list = [copy.deepcopy(e.numer.args) for e in poly_exprs]
+    # Build CSE input: numerators of all exprs, plus the common denominator as last entry.
+    # poly_cse is non-destructive (copies its input), so no deepcopy needed here.
+    poly_args_list = [e.numer.args for e in poly_exprs]
     if common_denom is not None:
-        poly_args_list.append(copy.deepcopy(common_denom.args))
+        poly_args_list.append(common_denom.args)
 
     # Collect all variable names and run polynomial CSE
     all_vars = {f for args in poly_args_list for m in args for f in m[1:] if isinstance(f, str)}
@@ -707,7 +709,7 @@ def _lambdify_poly_cse(args_dict, poly_exprs, funcname, common_denom=None):
         body_lines.append(f'    {stmt}')
 
     # Emit denominator local variable if needed (avoids recomputing it per return component)
-    if denom_simplified is not None and sum(1 for e in poly_exprs if e.denom != _unit) > 1:
+    if denom_simplified is not None and sum(1 for e in poly_exprs if e.denom != _UNIT_POLY) > 1:
         prelude_names = {stmt.split('=')[0].strip() for stmt in prelude}
         denom_var = '_d'
         while denom_var in prelude_names:
@@ -718,17 +720,14 @@ def _lambdify_poly_cse(args_dict, poly_exprs, funcname, common_denom=None):
         denom_ref = _poly_format(denom_simplified) if denom_simplified is not None else None
 
     ret_parts = [
-        _poly_format(simp) if (denom_ref is None or e.denom == _unit)
+        _poly_format(simp) if (denom_ref is None or e.denom == _UNIT_POLY)
         else f'({_poly_format(simp)})/({denom_ref})'
         for e, simp in zip(poly_exprs, numer_simplified)
     ]
     body_lines.append(f'    return [{", ".join(ret_parts)},]')
 
     header = f'def {funcname}({", ".join(names)}):'
-    func_source_no_doc = header + '\n' + '\n'.join(body_lines)
-    muls, adds = _count_muls_adds(func_source_no_doc)
-    func_source = '\n'.join([header, f'    """{muls} muls / {adds} adds"""'] + body_lines)
-    return _exec_and_cache(func_source, funcname)
+    return _build_and_cache_func(header, body_lines, funcname)
 
 
 def lambdify(args: dict, exprs: list, funcname: str, dependencies: tuple = None, printer=LambdaPrinter, dummify=False, cse=False):
@@ -776,15 +775,14 @@ def lambdify(args: dict, exprs: list, funcname: str, dependencies: tuple = None,
     # Try polynomial CSE before sympy conversion (faster and more targeted)
     if cse and dependencies is None and exprs:
         try:
-            from kingdon.polynomial import RationalPolynomial, Polynomial as _Poly
-            _unit = _Poly([[1]])
+            from kingdon.polynomial import RationalPolynomial, _UNIT_POLY
             if all(isinstance(e, RationalPolynomial) for e in exprs):
-                non_unit = [e for e in exprs if e.denom != _unit]
+                non_unit = [e for e in exprs if e.denom != _UNIT_POLY]
                 if not non_unit or all(e.denom == non_unit[0].denom for e in non_unit):
                     common_denom = non_unit[0].denom if non_unit else None
                     return _lambdify_poly_cse(args, exprs, funcname, common_denom=common_denom)
-        except Exception:
-            pass  # fall through to sympy path
+        except Exception as e:
+            warnings.warn(f"polynomial CSE failed: {e}", stacklevel=2)
 
     if printer is LambdaPrinter:
         printer = LambdaPrinter(
