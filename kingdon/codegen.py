@@ -146,14 +146,14 @@ def codegen_sw(x, y):
     if len(set((g % 2 for g in x.grades))) != 1:
         raise TypeError("x must be a versor (k-reflection) and thus either even or odd.")
     grade_x = max(x.grades)
-    from kingdon.polynomial import RationalPolynomial
-    _x_is_poly = all(isinstance(v, RationalPolynomial) for v in x.values())
-    if grade_x % 2 == 0 and 0 in x.grades and _x_is_poly:
+    if grade_x % 2 == 0 and 0 in x.grades:
+        from kingdon.polynomial import RationalPolynomial
+        if not all(isinstance(v, RationalPolynomial) for v in x.values()):
+            return sum((x * y.grade(g) * x.reverse()).grade(g) for g in y.grades)
         # Even versor with scalar component and RationalPolynomial coefficients:
         # use full GAmphetamine formula grade(a*b*~a + b*(1 - scalar_part(a*~a)), grade(b)).
         # The correction term enables polynomial CSE cancellations (e.g. a0² terms cancel).
         # For normalized versors, a*~a=1 so the correction vanishes mathematically.
-        # We only apply this for RationalPolynomial values to preserve standard numeric/sympy behavior.
         from kingdon.multivector import MultiVector
         alg = x.algebra
         axar = x * x.reverse()
@@ -661,82 +661,26 @@ def func_builder(res_vals: defaultdict, *mvs, funcname: str) -> CodegenOutput:
     return CodegenOutput(tuple(res_vals.keys()), func)
 
 
-def _lambdify_poly_cse(args_dict, poly_exprs, funcname):
-    """
-    Build a Python function using polynomial CSE (ported from polynomial.js).
-
-    :param args_dict: dict mapping arg name (str) to list of RationalPolynomial values.
-    :param poly_exprs: list of RationalPolynomial output expressions (unit denom assumed).
-    :param funcname: name for the generated function.
-    :return: compiled function with docstring containing op counts.
-    """
-    import copy
-    from kingdon.polynomial import poly_cse, _poly_format
-
-    # Extract raw polynomial args lists (deep copy to avoid mutation)
-    poly_args_list = [copy.deepcopy(e.numer.args) for e in poly_exprs]
-
-    # Collect all variable names from the expressions
-    all_vars = set()
-    for poly_args in poly_args_list:
-        for monomial in poly_args:
-            for f in monomial[1:]:
-                if isinstance(f, str):
-                    all_vars.add(f)
-
-    # Run polynomial CSE
-    prelude, simplified = poly_cse(poly_args_list, prot=None, iso=[2] + sorted(all_vars))
-
-    # Build argument unpacking lines
-    names = list(args_dict.keys())
-    body_lines = []
-    for name, values in args_dict.items():
-        var_names = []
-        for v in values:
-            numer_args = getattr(getattr(v, 'numer', None), 'args', None)
-            if numer_args == [[1]]:
-                var_names.append('_')
-            elif (numer_args and len(numer_args) == 1
-                  and len(numer_args[0]) == 2
-                  and numer_args[0][0] == 1):
-                var_names.append(str(numer_args[0][1]))
-            else:
-                var_names.append('_')
-        body_lines.append(f'    [{", ".join(var_names)}] = {name}')
-
-    for stmt in prelude:
-        body_lines.append(f'    {stmt}')
-
-    ret_exprs = [_poly_format(e) for e in simplified]
-    body_lines.append(f'    return [{", ".join(ret_exprs)},]')
-
-    header = f'def {funcname}({", ".join(names)}):'
-    func_source_no_doc = header + '\n' + '\n'.join(body_lines)
-    muls, adds = _count_muls_adds(func_source_no_doc)
-
-    func_source = '\n'.join([header, f'    """{muls} muls / {adds} adds"""']
-                            + body_lines)
-
+def _exec_and_cache(func_source, funcname):
+    """Compile, exec, and register func_source in linecache; return the function."""
     func_locals = {}
-    c = compile(func_source, funcname, 'exec')
-    exec(c, {'builtins': builtins, 'range': range}, func_locals)
-    linecache.cache[funcname] = (
-        len(func_source), None, func_source.splitlines(True), funcname)
+    exec(compile(func_source, funcname, 'exec'), {'builtins': builtins, 'range': range}, func_locals)
+    linecache.cache[funcname] = (len(func_source), None, func_source.splitlines(True), funcname)
     return func_locals[funcname]
 
 
-def _lambdify_poly_cse_rational(args_dict, poly_exprs, common_denom, funcname):
+def _lambdify_poly_cse(args_dict, poly_exprs, funcname, common_denom=None):
     """
-    Build a Python function for RationalPolynomial expressions sharing a common denominator.
+    Build a Python function using polynomial CSE (ported from polynomial.js).
 
-    All non-constant expressions in poly_exprs have denominator == common_denom.
-    Polynomial CSE is applied to the numerators and denominator together,
-    and the generated function divides the numerator results by the denominator.
+    When common_denom is given (a Polynomial), it is included in the CSE pass alongside
+    the expression numerators, assigned to a local variable, and used as a divisor in
+    the return for any expression whose denominator is not the unit polynomial.
 
     :param args_dict: dict mapping arg name (str) to list of RationalPolynomial values.
     :param poly_exprs: list of RationalPolynomial output expressions.
-    :param common_denom: Polynomial — the shared denominator for non-unit expressions.
     :param funcname: name for the generated function.
+    :param common_denom: optional Polynomial shared by all non-unit-denominator expressions.
     :return: compiled function with docstring containing op counts.
     """
     import copy
@@ -744,23 +688,17 @@ def _lambdify_poly_cse_rational(args_dict, poly_exprs, common_denom, funcname):
 
     _unit = _Poly([[1]])
 
-    # Build args list: numerators of all exprs + the common denominator as last entry
-    all_args_list = [copy.deepcopy(e.numer.args) for e in poly_exprs]
-    all_args_list.append(copy.deepcopy(common_denom.args))
+    # Build CSE input: numerators of all exprs, plus the common denominator as last entry
+    poly_args_list = [copy.deepcopy(e.numer.args) for e in poly_exprs]
+    if common_denom is not None:
+        poly_args_list.append(copy.deepcopy(common_denom.args))
 
-    # Collect all variable names
-    all_vars = set()
-    for poly_args in all_args_list:
-        for monomial in poly_args:
-            for f in monomial[1:]:
-                if isinstance(f, str):
-                    all_vars.add(f)
+    # Collect all variable names and run polynomial CSE
+    all_vars = {f for args in poly_args_list for m in args for f in m[1:] if isinstance(f, str)}
+    prelude, simplified = poly_cse(poly_args_list, prot=None, iso=[2] + sorted(all_vars))
 
-    # Run polynomial CSE on numerators + denominator together
-    prelude, simplified = poly_cse(all_args_list, prot=None, iso=[2] + sorted(all_vars))
-
-    numer_simplified = simplified[:-1]
-    denom_simplified = simplified[-1]
+    # Split simplified back into numerators and optional denominator
+    numer_simplified, denom_simplified = (simplified[:-1], simplified[-1]) if common_denom is not None else (simplified, None)
 
     # Build argument unpacking lines
     names = list(args_dict.keys())
@@ -769,11 +707,9 @@ def _lambdify_poly_cse_rational(args_dict, poly_exprs, common_denom, funcname):
         var_names = []
         for v in values:
             numer_args = getattr(getattr(v, 'numer', None), 'args', None)
-            if numer_args == [[1]]:
-                var_names.append('_')
-            elif (numer_args and len(numer_args) == 1
-                  and len(numer_args[0]) == 2
-                  and numer_args[0][0] == 1):
+            if (numer_args and len(numer_args) == 1
+                    and len(numer_args[0]) == 2
+                    and numer_args[0][0] == 1):
                 var_names.append(str(numer_args[0][1]))
             else:
                 var_names.append('_')
@@ -782,44 +718,29 @@ def _lambdify_poly_cse_rational(args_dict, poly_exprs, common_denom, funcname):
     for stmt in prelude:
         body_lines.append(f'    {stmt}')
 
-    denom_expr = _poly_format(denom_simplified)
-    # If more than one expression uses the denominator, assign it to a local variable
-    # to avoid recomputing it for each return component.
-    non_unit_count = sum(1 for e in poly_exprs if e.denom != _unit)
-    if non_unit_count > 1:
-        # Pick a name that doesn't clash with existing prelude vars (t0, t1, ...)
+    # Emit denominator local variable if needed (avoids recomputing it per return component)
+    if denom_simplified is not None and sum(1 for e in poly_exprs if e.denom != _unit) > 1:
         prelude_names = {stmt.split('=')[0].strip() for stmt in prelude}
         denom_var = '_d'
         while denom_var in prelude_names:
-            denom_var = '_d' + denom_var
-        body_lines.append(f'    {denom_var}={denom_expr}')
+            denom_var += '_'
+        body_lines.append(f'    {denom_var}={_poly_format(denom_simplified)}')
         denom_ref = denom_var
     else:
-        denom_ref = denom_expr
+        denom_ref = _poly_format(denom_simplified) if denom_simplified is not None else None
 
-    ret_parts = []
-    for e, simp in zip(poly_exprs, numer_simplified):
-        numer_fmt = _poly_format(simp)
-        if e.denom == _unit:
-            ret_parts.append(numer_fmt)
-        else:
-            ret_parts.append(f'({numer_fmt})/({denom_ref})')
-
+    ret_parts = [
+        _poly_format(simp) if (denom_ref is None or e.denom == _unit)
+        else f'({_poly_format(simp)})/({denom_ref})'
+        for e, simp in zip(poly_exprs, numer_simplified)
+    ]
     body_lines.append(f'    return [{", ".join(ret_parts)},]')
 
     header = f'def {funcname}({", ".join(names)}):'
     func_source_no_doc = header + '\n' + '\n'.join(body_lines)
     muls, adds = _count_muls_adds(func_source_no_doc)
-
-    func_source = '\n'.join([header, f'    """{muls} muls / {adds} adds"""']
-                            + body_lines)
-
-    func_locals = {}
-    c = compile(func_source, funcname, 'exec')
-    exec(c, {'builtins': builtins, 'range': range}, func_locals)
-    linecache.cache[funcname] = (
-        len(func_source), None, func_source.splitlines(True), funcname)
-    return func_locals[funcname]
+    func_source = '\n'.join([header, f'    """{muls} muls / {adds} adds"""'] + body_lines)
+    return _exec_and_cache(func_source, funcname)
 
 
 def lambdify(args: dict, exprs: list, funcname: str, dependencies: tuple = None, printer=LambdaPrinter, dummify=False, cse=False):
@@ -870,16 +791,10 @@ def lambdify(args: dict, exprs: list, funcname: str, dependencies: tuple = None,
             from kingdon.polynomial import RationalPolynomial, Polynomial as _Poly
             _unit = _Poly([[1]])
             if all(isinstance(e, RationalPolynomial) for e in exprs):
-                if all(e.denom == _unit for e in exprs):
-                    return _lambdify_poly_cse(args, exprs, funcname)
-                else:
-                    # Check if all non-constant expressions share a common denominator.
-                    # If so, factor it out: apply poly CSE to numerators, divide by denom at runtime.
-                    non_unit = [e for e in exprs if e.denom != _unit]
-                    if non_unit:
-                        first_denom = non_unit[0].denom
-                        if all(e.denom == first_denom for e in non_unit):
-                            return _lambdify_poly_cse_rational(args, exprs, first_denom, funcname)
+                non_unit = [e for e in exprs if e.denom != _unit]
+                if not non_unit or all(e.denom == non_unit[0].denom for e in non_unit):
+                    common_denom = non_unit[0].denom if non_unit else None
+                    return _lambdify_poly_cse(args, exprs, funcname, common_denom=common_denom)
         except Exception:
             pass  # fall through to sympy path
 

@@ -665,27 +665,7 @@ class Polynomial:
         return self * (1 / other)
 
     def __str__(self):
-        terms = []
-        for monomial in self.args:
-            coeff = monomial[0]
-            factors = monomial[1:]
-            if not factors:
-                terms.append(str(coeff))
-            elif coeff == 1:
-                terms.append('*'.join(str(f) for f in factors if f != 1) or '1')
-            elif coeff == -1:
-                terms.append('-' + '*'.join(str(f) for f in factors if f != 1))
-            else:
-                terms.append('*'.join([str(coeff)] + [str(f) for f in factors if f != 1]))
-        if not terms:
-            return '0'
-        result = terms[0]
-        for t in terms[1:]:
-            if t.startswith('-'):
-                result += ' - ' + t[1:]
-            else:
-                result += ' + ' + t
-        return result
+        return _poly_format(self.args)
 
     def tosympy(self):
         """ Return a sympy version of this Polynomial. """
