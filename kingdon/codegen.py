@@ -16,62 +16,8 @@ import keyword
 from sympy.utilities.iterables import iterable, flatten
 from sympy.printing.lambdarepr import LambdaPrinter
 
-
-@dataclass
-class AdditionChains:
-    limit: int
-
-    @cached_property
-    def minimal_chains(self) -> Dict[int, Tuple[int, ...]]:
-        chains = {1: (1,)}
-        while any(i not in chains for i in range(1, self.limit + 1)):
-            for chain in chains.copy().values():
-                right_summand = chain[-1]
-                for left_summand in chain:
-                    value = left_summand + right_summand
-                    if value <= self.limit and value not in chains:
-                        chains[value] = (*chain, value)
-        return chains
-
-    def __getitem__(self, n: int) -> Tuple[int, ...]:
-        return self.minimal_chains[n]
-
-    def __contains__(self, item):
-        return self[item]
-
-def power_supply(x: "MultiVector", exponents: Tuple[int, ...], operation: Callable[["MultiVector", "MultiVector"], "MultiVector"] = operator.mul):
-    """
-    Generates powers of a given multivector using the least amount of multiplications.
-    For example, to raise a multivector :math:`x` to the power :math:`a = 15`, only 5
-    multiplications are needed since :math:`x^{2} = x * x`, :math:`x^{3} = x * x^2`,
-    :math:`x^{5} = x^2 * x^3`, :math:`x^{10} = x^5 * x^5`, :math:`x^{15} = x^5 * x^{10}`.
-    The :class:`power_supply` uses :class:`AdditionChains` to determine these shortest
-    chains.
-
-    When called with only a single integer, e.g. :code:`power_supply(x, 15)`, iterating
-    over it yields the above sequence in order; ending with :math:`x^{15}`.
-
-    When called with a sequence of integers, the generator instead returns only the requested terms.
-
-
-    :param x: The MultiVector to be raised to a power.
-    :param exponents: When an :code:`int`, this generates the shortest possible way to
-        get to :math:`x^a`, where :math:`x`
-    """
-    if isinstance(exponents, int):
-        target = exponents
-        addition_chains = AdditionChains(target)
-        exponents = addition_chains[target]
-    else:
-        addition_chains = AdditionChains(max(exponents))
-
-    powers = {1: x}
-    for step in exponents:
-        if step not in powers:
-            chain = addition_chains[step]
-            powers[step] = operation(powers[chain[-2]], powers[step - chain[-2]])
-
-        yield powers[step]
+from kingdon.powers import power_supply
+from kingdon.polynomial import poly_cse, poly_format, Polynomial, RationalPolynomial
 
 
 class CodegenOutput(NamedTuple):
@@ -655,7 +601,6 @@ def _poly_cse_compute(exprs: List[RationalPolynomial], common_denom: Optional[Po
         - numer_simplified: list of poly_args lists for simplified numerators.
         - denom_simplified: poly_args list for the simplified denominator, or None.
     """
-    from kingdon.polynomial import poly_cse
     # Build CSE input: numerators of all exprs, plus the common denominator as last entry.
     poly_args_list = [e.numer.args for e in exprs]
     if common_denom is not None:
@@ -682,7 +627,6 @@ def _lambdify_poly_cse(args_dict, exprs, funcname, cse_pairs, numer_simplified, 
     :param denom_simplified: simplified denominator poly_args, or None.
     :return: compiled function with docstring containing op counts.
     """
-    from kingdon.polynomial import poly_format
     # Build argument unpacking lines
     names = list(args_dict.keys())
     body_lines = []
@@ -770,7 +714,6 @@ def lambdify(args: dict, exprs: list, funcname: str, printer=None, func_printer=
     cses, _exprs = [], exprs
     cse_pairs, numer_simplified, denom_simplified = None, None, None
 
-    from kingdon.polynomial import RationalPolynomial, Polynomial
     if exprs and all(isinstance(e, RationalPolynomial) for e in exprs):
         if cse:
             non_unit = [e for e in exprs if e.denom != 1]

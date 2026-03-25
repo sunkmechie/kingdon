@@ -5,7 +5,7 @@ from fractions import Fraction
 
 from sympy import Mul, Add, Symbol, RealNumber
 
-from kingdon.codegen import power_supply
+from kingdon.powers import power_supply
 
 
 # ---------------------------------------------------------------------------
