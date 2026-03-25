@@ -278,14 +278,6 @@ Tuple representing a fraction.
 """
 
 
-class LambdifyInput(NamedTuple):
-    """ Strike package for the Lambdify function. """
-    funcname: str
-    args: dict
-    expr_dict: dict
-    dependencies: list
-
-
 def codegen_inv(y, symbolic=False):
     alg = y.algebra
     # If y * ~y is a scalar, use the simple blade inverse ~y / (y * ~y).
@@ -557,15 +549,9 @@ def do_codegen(codegen, *mvs) -> CodegenOutput:
     if isinstance(res, CodegenOutput):
         return res
 
-    if isinstance(res, LambdifyInput):
-        funcname = res.funcname
-        args = res.args
-        dependencies = res.dependencies
-        res = res.expr_dict
-    else:
-        funcname = f'{codegen.__name__}_' + '_x_'.join(f"{format(mv.type_number, 'X')}" for mv in mvs)
-        args = {arg_name: arg.values() for arg_name, arg in zip(string.ascii_uppercase, mvs)}
-        dependencies = None
+    funcname = f'{codegen.__name__}_' + '_x_'.join(f"{format(mv.type_number, 'X')}" for mv in mvs)
+    args = {arg_name: arg.values() for arg_name, arg in zip(string.ascii_uppercase, mvs)}
+    dependencies = None
 
     # Sort the keys in canonical order
     res = {bin: res[bin] if isinstance(res, dict) else getattr(res, canon)
