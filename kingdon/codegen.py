@@ -3,7 +3,7 @@ from __future__ import annotations
 import string
 from itertools import product, combinations, groupby
 from collections import namedtuple, defaultdict
-from typing import NamedTuple, Callable, Tuple, Dict
+from typing import NamedTuple, Callable, Tuple, Dict, Optional, List
 from functools import reduce, cached_property
 import linecache
 import warnings
@@ -391,7 +391,7 @@ def codegen_outerexp(x, asterms=False):
         warnings.warn('Outer exponential might not converge for mixed-grade multivectors.', RuntimeWarning)
     k = alg.d
 
-    Ws = [alg.scalar([1]), x]
+    Ws = [alg.scalar(e=1), x]
     j = 2
     while j <= k:
         Wj = Ws[-1] ^ x
@@ -556,9 +556,8 @@ def do_codegen(codegen, *mvs) -> CodegenOutput:
     res = {bin: res[bin] if isinstance(res, dict) else getattr(res, canon)
            for canon, bin in algebra.canon2bin.items() if bin in res.keys()}
 
-    if not algebra.cse and any(isinstance(v, str) for v in res.values()):
+    if all(isinstance(v, str) for v in res.values()):
         return func_builder(res, *mvs, funcname=funcname)
-
 
     keys, exprs = tuple(res.keys()), list(res.values())
     func = lambdify(args, exprs, funcname=funcname, cse=algebra.cse)
@@ -645,36 +644,45 @@ def func_builder(res_vals: defaultdict, *mvs, funcname: str) -> CodegenOutput:
     return CodegenOutput(tuple(res_vals.keys()), func)
 
 
-def _lambdify_poly_cse(args_dict, poly_exprs, funcname, common_denom=None):
+def _poly_cse_compute(exprs: List[RationalPolynomial], common_denom: Optional[Polynomial] = None):
     """
-    Build a Python function using polynomial CSE (ported from polynomial.js).
+    Run CSE on a list of :class:`~kingdon.polynomial.RationalPolynomial` expressions.
 
-    When common_denom is given (a Polynomial), it is included in the CSE pass alongside
-    the expression numerators, assigned to a local variable, and used as a divisor in
-    the return for any expression whose denominator is not the unit polynomial.
-
-    :param args_dict: dict mapping arg name (str) to list of RationalPolynomial values.
-    :param poly_exprs: list of RationalPolynomial output expressions.
-    :param funcname: name for the generated function.
-    :param common_denom: optional Polynomial shared by all non-unit-denominator expressions.
-    :return: compiled function with docstring containing op counts.
+    :param exprs: list of :class:`~kingdon.polynomial.RationalPolynomial` expressions.
+    :param common_denom: optional :class:`~kingdon.polynomial.Polynomial` common denominator.
+    :return: (cse_pairs, numer_simplified, denom_simplified) where:
+        - cse_pairs: list of (name, poly_args) tuples for each extracted subexpression.
+        - numer_simplified: list of poly_args lists for simplified numerators.
+        - denom_simplified: poly_args list for the simplified denominator, or None.
     """
-
-    from kingdon.polynomial import poly_cse, _poly_format
-
+    from kingdon.polynomial import poly_cse
     # Build CSE input: numerators of all exprs, plus the common denominator as last entry.
-    # poly_cse is non-destructive (copies its input), so no deepcopy needed here.
-    poly_args_list = [e.numer.args for e in poly_exprs]
+    poly_args_list = [e.numer.args for e in exprs]
     if common_denom is not None:
         poly_args_list.append(common_denom.args)
 
-    # Collect all variable names and run polynomial CSE
-    all_vars = {f for args in poly_args_list for m in args for f in m[1:] if isinstance(f, str)}
-    prelude, simplified = poly_cse(poly_args_list, prot=None, iso=[2] + sorted(all_vars))
+    all_vars = {f for pl in poly_args_list for m in pl for f in m[1:] if isinstance(f, str)}
+    cse_pairs, simplified = poly_cse(poly_args_list, prot=None, iso=[2] + sorted(all_vars))
 
-    # Split simplified back into numerators and optional denominator
-    numer_simplified, denom_simplified = (simplified[:-1], simplified[-1]) if common_denom is not None else (simplified, None)
+    numer_simplified = simplified[:-1] if common_denom is not None else simplified
+    denom_simplified = simplified[-1] if common_denom is not None else None
 
+    return cse_pairs, numer_simplified, denom_simplified
+
+
+def _lambdify_poly_cse(args_dict, exprs, funcname, cse_pairs, numer_simplified, denom_simplified):
+    """
+    Build a Python function from pre-computed polynomial CSE results.
+
+    :param args_dict: dict mapping arg name (str) to list of :class:`~kingdon.polynomial.RationalPolynomial` values.
+    :param exprs: list of :class:`~kingdon.polynomial.RationalPolynomial` expressions (for denom checks).
+    :param funcname: name for the generated function.
+    :param cse_pairs: list of (name, poly_args) from :func:`_poly_cse_compute`.
+    :param numer_simplified: simplified numerator poly_args per expression.
+    :param denom_simplified: simplified denominator poly_args, or None.
+    :return: compiled function with docstring containing op counts.
+    """
+    from kingdon.polynomial import poly_format
     # Build argument unpacking lines
     names = list(args_dict.keys())
     body_lines = []
@@ -690,24 +698,24 @@ def _lambdify_poly_cse(args_dict, poly_exprs, funcname, common_denom=None):
                 var_names.append('_')
         body_lines.append(f'    [{", ".join(var_names)}] = {name}')
 
-    for stmt in prelude:
-        body_lines.append(f'    {stmt}')
+    for cse_name, poly_args in cse_pairs:
+        body_lines.append(f'    {cse_name}={poly_format(poly_args)}')
 
     # Emit denominator local variable if needed (avoids recomputing it per return component)
-    if denom_simplified is not None and sum(1 for e in poly_exprs if e.denom != 1) > 1:
-        prelude_names = {stmt.split('=')[0].strip() for stmt in prelude}
+    if denom_simplified is not None and sum(1 for e in exprs if e.denom != 1) > 1:
+        cse_names = {cse_name for cse_name, _ in cse_pairs}
         denom_var = '_d'
-        while denom_var in prelude_names:
+        while denom_var in cse_names:
             denom_var += '_'
-        body_lines.append(f'    {denom_var}={_poly_format(denom_simplified)}')
+        body_lines.append(f'    {denom_var}={poly_format(denom_simplified)}')
         denom_ref = denom_var
     else:
-        denom_ref = _poly_format(denom_simplified) if denom_simplified is not None else None
+        denom_ref = poly_format(denom_simplified) if denom_simplified is not None else None
 
     ret_parts = [
-        _poly_format(simp) if (denom_ref is None or e.denom == 1)
-        else f'({_poly_format(simp)})/({denom_ref})'
-        for e, simp in zip(poly_exprs, numer_simplified)
+        poly_format(simp) if (denom_ref is None or e.denom == 1)
+        else f'({poly_format(simp)})/({denom_ref})'
+        for e, simp in zip(exprs, numer_simplified)
     ]
     body_lines.append(f'    return [{", ".join(ret_parts)},]')
 
@@ -715,7 +723,7 @@ def _lambdify_poly_cse(args_dict, poly_exprs, funcname, common_denom=None):
     return _build_and_cache_func(header, body_lines, funcname)
 
 
-def lambdify(args: dict, exprs: list, funcname: str, printer=LambdaPrinter, dummify=False, cse=False):
+def lambdify(args: dict, exprs: list, funcname: str, printer=None, func_printer=None, dummify=False, cse=False):
     """
     Function that turns symbolic expressions into Python functions. Heavily inspired by
     :mod:`sympy`'s function by the same name, but adapted for the needs of :code:`kingdon`.
@@ -752,45 +760,55 @@ def lambdify(args: dict, exprs: list, funcname: str, printer=LambdaPrinter, dumm
     :param args: dictionary of type dict[str | Symbol, tuple[Symbol]].
     :param exprs: tuple[Expr]
     :param funcname: string to be used as the bases for the name of the function.
+    :param printer: Instance of the sympy style printer used to print individual sympy expressions.
+    :param func_printer: Instance of the sympy style printer used to generate functions using the `printer`.
     :param cse: If :code:`True` (default), CSE is applied to the expressions.
         This typically greatly improves performance and reduces numba's initialization time.
     :return: Function that represents that can be used to calculate the values of exprs.
     """
-    # Try polynomial CSE before sympy conversion (faster and more targeted)
-    if cse and exprs:
-        from kingdon.polynomial import RationalPolynomial
-        if all(isinstance(e, RationalPolynomial) for e in exprs):
+    tosympy = lambda x: x.tosympy() if hasattr(x, 'tosympy') else x
+    cses, _exprs = [], exprs
+    cse_pairs, numer_simplified, denom_simplified = None, None, None
+
+    from kingdon.polynomial import RationalPolynomial, Polynomial
+    if exprs and all(isinstance(e, RationalPolynomial) for e in exprs):
+        if cse:
             non_unit = [e for e in exprs if e.denom != 1]
             if not non_unit or all(e.denom == non_unit[0].denom for e in non_unit):
                 common_denom = non_unit[0].denom if non_unit else None
-                return _lambdify_poly_cse(args, exprs, funcname, common_denom=common_denom)
+                cse_pairs, numer_simplified, denom_simplified = _poly_cse_compute(exprs, common_denom)
 
-    if printer is LambdaPrinter:
+                if printer is None and func_printer is None:
+                    return _lambdify_poly_cse(args, exprs, funcname, cse_pairs, numer_simplified, denom_simplified)
+
+    if cse_pairs is not None:       
+        args = {name: [tosympy(v) for v in values] for name, values in args.items()}
+        cses = [(name, tosympy(Polynomial(poly_args))) for name, poly_args in cse_pairs]
+        _exprs = [tosympy(Polynomial(expr)) for expr in [*numer_simplified, denom_simplified]]
+    else:
+        args = {name: [tosympy(v) for v in values] for name, values in args.items()}
+        _exprs = [tosympy(expr) for expr in exprs]
+
+    if cse and not cses:
+        if not callable(cse):
+            from sympy.simplify.cse_main import cse
+        cses, _exprs = cse(_exprs, list=False)
+
+    if not any(_exprs):
+        _exprs = list('0' for expr in _exprs)
+
+    if printer is None:
         printer = LambdaPrinter(
             {'fully_qualified_modules': False, 'inline': True,
              'allow_unknown_functions': True,
              'user_functions': {}}
         )
+    if func_printer is None:
+        func_printer = KingdonPrinter(printer, dummify)
 
-    tosympy = lambda x: x.tosympy() if hasattr(x, 'tosympy') else x
-    args = {name: [tosympy(v) for v in values]
-            for name, values in args.items()}
-    exprs = [tosympy(expr) for expr in exprs]
     names = tuple(arg if isinstance(arg, str) else arg.name for arg in args.keys())
     iterable_args = tuple(args.values())
-
-    funcprinter = KingdonPrinter(printer, dummify)
-
-    if cse and not any(isinstance(expr, str) for expr in exprs):
-        if not callable(cse):
-            from sympy.simplify.cse_main import cse
-        cses, _exprs = cse(exprs, list=False)
-    else:
-        cses, _exprs = [], exprs
-
-    if not any(_exprs):
-        _exprs = list('0' for expr in _exprs)
-    funcstr = funcprinter.doprint(funcname, iterable_args, names, _exprs, cses=cses)
+    funcstr = func_printer.doprint(funcname, iterable_args, names, _exprs, cses=cses)
 
     # Provide lambda expression with builtins, and compatible implementation of range
     namespace = {'builtins': builtins, 'range': range}

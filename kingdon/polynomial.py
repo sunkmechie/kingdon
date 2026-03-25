@@ -14,7 +14,7 @@ from kingdon.codegen import power_supply
 
 
 
-def _poly_format(poly_args):
+def poly_format(poly_args):
     """Format a raw polynomial args list (or 0) to a Python code string."""
     if poly_args == 0 or poly_args == []:
         return '0'
@@ -28,7 +28,7 @@ def _poly_format(poly_args):
             parts = []
             for f in factors:
                 if isinstance(f, list):
-                    inner = _poly_format(f)
+                    inner = poly_format(f)
                     parts.append(f'({inner})')
                 elif f != 1:
                     parts.append(str(f))
@@ -119,7 +119,7 @@ def _find_shared_sums(expr, iso_vars, prelude, start_count=0, sum_map=None):
         sn = 't' + str(sum_count)
         sum_count += 1
         norm = cand['occs'][0]['norm']
-        prelude.append(sn + '=' + _poly_format(norm))
+        prelude.append((sn, [list(t) for t in norm]))
 
         if (sum_map is not None and len(norm) == 2
                 and len(norm[0]) == 2 and len(norm[1]) == 2):
@@ -320,7 +320,7 @@ def _find_shared_products(expr, prot, prelude):
 
     for k in prod_list:
         combined = f'{k[0]}{k[1]}'
-        prelude.append(f'{combined}={k[0]}*{k[1]}')
+        prelude.append((combined, [[1, k[0], k[1]]]))
 
 
 def _substitute_extracted(expr, sum_map):
@@ -478,7 +478,7 @@ def poly_cse(expr, prot=None, iso=None):
     if dep:
         for d in dep['deps']:
             rn = 'u' + str(d['comp'])
-            prelude.append(rn + '=' + _poly_format(expr[d['comp']]))
+            prelude.append((rn, list(expr[d['comp']])))
             expr[d['comp']] = [[1, rn]]
         expr[dep['heaviest']] = [[-d['sign'], d['cv'], 'u' + str(d['comp'])]
                                   for d in dep['deps']]
@@ -648,14 +648,17 @@ class Polynomial:
         return self * (1 / other)
 
     def __str__(self):
-        return _poly_format(self.args)
+        return poly_format(self.args)
 
     def tosympy(self):
         """ Return a sympy version of this Polynomial. """
+        def _to_sym(s):
+            if isinstance(s, list):
+                return Polynomial(s).tosympy()
+            return Symbol(s) if isinstance(s, str) else s
         preprocessed = (monomial if len(monomial) == 1 else monomial[1:] if monomial[0] == 1 else monomial
                         for monomial in self.args)
-        sympified = ([Symbol(s) if isinstance(s, str) else s for s in monomial]
-                     for monomial in preprocessed)
+        sympified = ([_to_sym(s) for s in monomial] for monomial in preprocessed)
         terms = (Mul(*monomial, evaluate=True) for monomial in sympified)
         res = Add(*terms, evaluate=True)
         return res
