@@ -208,11 +208,11 @@ Below is an overview:
      - :math:`a \vee b`
      - :code:`a & b`
      - :code:`a.rp(b)`
-   * - Conjugate :code:`a` by :code:`b`
+   * - Conjugate :code:`a` by :code:`b` with :math:`\widetilde{b}b = 1`
      - :math:`(-1)^{\text{grade}(b) \text{grade}(a)} b a \widetilde{b}`
      - :code:`b >> a`
      - :code:`b.sw(a)`
-   * - Project :code:`a` onto :code:`b`
+   * - Project :code:`a` onto :code:`b` with :math:`\widetilde{b}b = 1`
      - :math:`(a \cdot b) \widetilde{b}`
      - :code:`a @ b`
      - :code:`a.proj(b)`
@@ -266,27 +266,6 @@ Below is an overview:
      - :code:`a.grade(k)`
 
 
-Note that formally conjugation is defined by :math:`ba b^{-1}` and
-projection by :math:`(a \cdot b) b^{-1}`, but that both are implemented
-using reversion instead of an inverse. This is because reversion is much faster to calculate,
-and because in practice :math:`b` will often by either a rotor satisfying
-:math:`b \widetilde{b} = 1` or a blade satisfying :math:`b^2 = b \cdot b`,
-and thus the inverse is identical to the reverse (up to sign).
-
-If you want to replace these operators by their proper definitions, you can use the register decorator to
-overwrite the default operator (use at your own risk):
-
-
-.. code-block::
-
-    >>> @alg.register(name='sw')
-    >>> def sw(x, y):
-    >>>     return x * y / y
-    >>> @alg.register(name='proj')
-    >>> def proj(x, y):
-    >>>     return (x | y) / y
-
-
 Graphing using :code:`ganja.js`
 -------------------------------
 
@@ -329,15 +308,70 @@ For examples of large algebra's, see the OPNS section of the `teahouse <https://
 Performance Tips
 ----------------
 Because :code:`kingdon` attempts to symbolically optimize expressions the first time they are called, the first
-call to any operation is comparatively slow, whereas subsequent calls have very good performance.
+call to any operation is relatively slow, whereas subsequent calls have extremely good performance. 
+Note however that even the first execution that includes the symbolic optimization typically 
+takes on the order of milliseconds, so you probably won't even notice it.
 
-There are however several things to be aware of to ensure good performance.
+Since `kingdon` v2.2.x the symbolic code generation features a port of `GAMphetamine.js <https://github.com/enkimute/GAmphetamine.js>_`'s 
+very powerful Common Subexpression Elimination (CSE) algorithm, which results in the most 
+optimal code known to man. As in, for those cases in which a hand optimized optimum is known, 
+the CSE optimized code is exactly the same. Moreover, it is *quick*. 
+Praise `Enki <https://github.com/enkimute>`_.
+
+The table below lists multiplications and additions counted in the emitted Python for representative **3DPGA** expressions
+when CSE is enabled vs not. Count columns use :code:`muls/adds`.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 48 14 14
+
+   * - Operation
+     - CSE
+     - Naive
+   * - :code:`R >> p`, :math:`R` even, :math:`p` normalized point
+     - :code:`21/18`
+     - :code:`84/33`
+   * - :code:`R >> d`, :math:`R` even, :math:`d` a direction
+     - :code:`18/12`
+     - :code:`60/20`
+   * - :code:`R >> o`, :math:`R` even, :math:`o` the origin
+     - :code:`15/9`
+     - :code:`24/12`
+   * - :code:`R >> e032`, :math:`R` even, pure :math:`\mathbf{e}_{032}` blade
+     - :code:`6/4`
+     - :code:`11/6`
+   * - :math:`p_1 \vee p_2` — join of two normalized points (regressive product)
+     - :code:`6/6`
+     - :code:`6/10`
+   * - :math:`p \vee \ell` — normalized point :math:`p`, line :math:`\ell` (bivector)
+     - :code:`9/9`
+     - :code:`9/11`
+   * - :math:`p_1 \vee p_2 \vee p_3` — join of three normalized points
+     - :code:`9/12`
+     - :code:`30/22`
+   * - :math:`(p \cdot P)\,P^{-1}` — project normalized point :math:`p` on plane :math:`P`
+     - :code:`18/12`
+     - :code:`51/20`
+   * - :math:`(p \cdot P) * P + (p * (1 - P * ~P)).grade(3)` — normalized plane :math:`P`
+     - :code:`6/6`
+     - :code:`24/15`
+   * - :math:`(p \cdot \ell) * (-\ell) + (p * (1 - \ell * ~ \ell)).grade(3)` — normalized line :math:`\ell`
+     - :code:`15/15`
+     - :code:`39/22`
+
+.. note::
+    Not all of these counts are achieved yet by `kingdon`'s default binary operators, but the CSE infrastructure is now in place.
+    In order to achieve these counts out of the box requires to also translate GAmphetamine.js's type system, which is on the v3.x roadmap.
+
+The symbolically optimized code that kingdon produces is already a good starting point for high performance code.
+However, there are still several things to be aware of to ensure good performance.
 
 Broadcasting
 ~~~~~~~~~~~~
 Avoid arrays of multivectors, and use multivectors over e.g. :code:`numpy` arrays or :code:`PyTorch`
-tensors instead, as shown in the numerical section.
-This ensures the high level overhead of kingdon is paid only once.
+tensors instead, as shown in :doc:`arrays`.
+This ensures the high level overhead of kingdon is paid only once, and we instead delegate 
+the computation to the underlying datastructures.
 
 Register Expressions
 ~~~~~~~~~~~~~~~~~~~~
@@ -359,21 +393,25 @@ decorator.
 Calling the decorated :code:`myfunc` has the benefit that all the numerical computation is done in one single call,
 instead of doing each binary operation individually. This has the benefit that all the (expensive) python boilerplate
 code is called only once.
-Moreover, one can use :code:`@alg.register(symbolic=True)`
+Moreover, one can use :code:`@alg.register(symbolic=True)` to symbolically optimize the expression, similar to how 
+`kingdon`'s default binary operators work. As we have seen above in the CSE section, this can result in significant 
+performance improvements. Afterall, the fastest computation is one you do not have to do.
 
 Graded
 ~~~~~~
 The first time :code:`kingdon` is asked to perform an operation it hasn't seen before, it performs code generation
-for that particular request. Because codegen is the most expensive step, it can be beneficial to reduce the number of
+for that particular request. Because codegen is a relatively expensive step, it can be beneficial to reduce the number of
 times it is needed. An easy way to achieve this is to initiate the :class:`~kingdon.algebra.Algebra` with `graded=True`.
 This enforces that :code:`kingdon` does not specialize codegen down to the individual basis blades, but rather only
 per grade. This means there are far less combinations that have to be considered and generated.
 
 Numba JIT
 ~~~~~~~~~
-We can enable numba just-in-time compilation by initiating an :class:`~kingdon.algebra.Algebra` with `wrapper=numba.njit`.
+We can enable numba just-in-time compilation by initiating an :class:`~kingdon.algebra.Algebra` with `wrapper=numba.njit`,
+which will apply numba's njit decorator to all of kingdon's generated functions.
 This comes with a significant cost the first time any operator is called, but subsequent calls to the same operator are
-significantly faster. It is worth mentioning that when dealing with :ref:`Numerical Multivectors` over numpy arrays,
+significantly faster. 
+However, it is worth mentioning that when dealing with :ref:`Numerical Multivectors` over e.g. numpy arrays,
 the benefit of using `numba` actually disappears rapidly as the numpy arrays become larger, since then most of the time
 is spend in numpy routines anyway.
 So you need to experiment carefully if numba is right for you.
