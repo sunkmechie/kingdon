@@ -170,6 +170,15 @@ def test_sw_even_normalized_point(pga3d, pga3d_no_cse):
 
     check_same_result(func_cse, func_nc, _NUM_EVEN, _NUM_POINT)
 
+    # Also check that codegen via sympy produces a suboptimal result
+    a_sp = a.map(lambda v: v.tosympy())
+    b_sp = b.map(lambda v: v.tosympy())
+    _, func_sp = do_codegen(codegen_sw, a_sp, b_sp)
+    muls_sp, adds_sp = get_op_counts(func_sp)
+    assert muls_sp == 68
+    assert adds_sp == 30
+    check_same_result(func_sp, func_nc, _NUM_EVEN, _NUM_POINT)
+
 
 def test_sw_even_direction(pga3d, pga3d_no_cse):
     """3DPGA normalized even >>> direction: CSE 18 muls/12 adds vs no-CSE 60 muls/20 adds."""
