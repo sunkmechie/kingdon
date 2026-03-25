@@ -551,7 +551,6 @@ def do_codegen(codegen, *mvs) -> CodegenOutput:
 
     funcname = f'{codegen.__name__}_' + '_x_'.join(f"{format(mv.type_number, 'X')}" for mv in mvs)
     args = {arg_name: arg.values() for arg_name, arg in zip(string.ascii_uppercase, mvs)}
-    dependencies = None
 
     # Sort the keys in canonical order
     res = {bin: res[bin] if isinstance(res, dict) else getattr(res, canon)
@@ -562,7 +561,7 @@ def do_codegen(codegen, *mvs) -> CodegenOutput:
 
 
     keys, exprs = tuple(res.keys()), list(res.values())
-    func = lambdify(args, exprs, funcname=funcname, cse=algebra.cse, dependencies=dependencies)
+    func = lambdify(args, exprs, funcname=funcname, cse=algebra.cse)
     return CodegenOutput(
         keys, func
     )
@@ -716,7 +715,7 @@ def _lambdify_poly_cse(args_dict, poly_exprs, funcname, common_denom=None):
     return _build_and_cache_func(header, body_lines, funcname)
 
 
-def lambdify(args: dict, exprs: list, funcname: str, dependencies: tuple = None, printer=LambdaPrinter, dummify=False, cse=False):
+def lambdify(args: dict, exprs: list, funcname: str, printer=LambdaPrinter, dummify=False, cse=False):
     """
     Function that turns symbolic expressions into Python functions. Heavily inspired by
     :mod:`sympy`'s function by the same name, but adapted for the needs of :code:`kingdon`.
@@ -753,16 +752,12 @@ def lambdify(args: dict, exprs: list, funcname: str, dependencies: tuple = None,
     :param args: dictionary of type dict[str | Symbol, tuple[Symbol]].
     :param exprs: tuple[Expr]
     :param funcname: string to be used as the bases for the name of the function.
-    :param dependencies: These are extra expressions that can be provided such that quantities can be precomputed.
-        For example, in the inverse of a multivector, this is used to compute the scalar denominator only once,
-        after which all values in expr are multiplied by it. When :code:`cse = True`, these dependencies are also
-        included in the CSE process.
-    :param cse: If :code:`True` (default), CSE is applied to the expressions and dependencies.
+    :param cse: If :code:`True` (default), CSE is applied to the expressions.
         This typically greatly improves performance and reduces numba's initialization time.
     :return: Function that represents that can be used to calculate the values of exprs.
     """
     # Try polynomial CSE before sympy conversion (faster and more targeted)
-    if cse and dependencies is None and exprs:
+    if cse and exprs:
         from kingdon.polynomial import RationalPolynomial
         if all(isinstance(e, RationalPolynomial) for e in exprs):
             non_unit = [e for e in exprs if e.denom != 1]
@@ -781,27 +776,17 @@ def lambdify(args: dict, exprs: list, funcname: str, dependencies: tuple = None,
     args = {name: [tosympy(v) for v in values]
             for name, values in args.items()}
     exprs = [tosympy(expr) for expr in exprs]
-    if dependencies is not None:
-        dependencies = [(tosympy(y), tosympy(x)) for y, x in dependencies]
     names = tuple(arg if isinstance(arg, str) else arg.name for arg in args.keys())
     iterable_args = tuple(args.values())
 
     funcprinter = KingdonPrinter(printer, dummify)
 
-    # TODO: Extend CSE to include the dependencies.
-    lhsides, rhsides = zip(*dependencies) if dependencies else ([], [])
     if cse and not any(isinstance(expr, str) for expr in exprs):
         if not callable(cse):
             from sympy.simplify.cse_main import cse
-        if dependencies:
-            all_exprs = [*exprs, *rhsides]
-            cses, _all_exprs = cse(all_exprs, list=False, order='none', ignore=lhsides)
-            _exprs, _rhsides = _all_exprs[:-len(rhsides)], _all_exprs[len(exprs):]
-            cses.extend(list(zip(flatten(lhsides), flatten(_rhsides))))
-        else:
-            cses, _exprs = cse(exprs, list=False)
+        cses, _exprs = cse(exprs, list=False)
     else:
-        cses, _exprs = list(zip(flatten(lhsides), flatten(rhsides))), exprs
+        cses, _exprs = [], exprs
 
     if not any(_exprs):
         _exprs = list('0' for expr in _exprs)
