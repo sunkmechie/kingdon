@@ -675,7 +675,7 @@ class RationalPolynomial:
         elif isinstance(numer, (list, tuple)):
             numer = Polynomial(numer)
         if denom is None:
-            denom = _UNIT_POLY
+            denom = Polynomial([[1]])
         elif isinstance(denom, (list, tuple)):
             denom = Polynomial(denom)
         self.numer = numer
@@ -794,7 +794,3 @@ class RationalPolynomial:
 
     def __bool__(self):
         return self.numer.__bool__()
-
-
-# Module-level unit polynomial constant — avoids repeated allocation.
-_UNIT_POLY = Polynomial([[1]])

@@ -209,6 +209,27 @@ def test_sw_even_origin(pga3d, pga3d_no_cse):
     check_same_result(func_cse, func_nc, _NUM_EVEN, _NUM_ORIGIN)
 
 
+def test_sw_even_e032_half(pga3d, pga3d_no_cse):
+    """3DPGA normalized (even >>> e032) / 2: CSE 6 muls/4 adds vs no-CSE 6 muls/4 adds (no improvement)."""
+    def codegen_sw_e032_half(a, b):
+        return (a >> b) * 0.5
+    a = make_even(pga3d)
+    b = make_pure_e032(pga3d)
+    _, func_cse = do_codegen(codegen_sw_e032_half, a, b)
+    muls, adds = get_op_counts(func_cse)
+    assert muls == 6
+    assert adds == 4
+
+    a_nc = make_even(pga3d_no_cse)
+    b_nc = make_pure_e032(pga3d_no_cse)
+    _, func_nc = do_codegen(codegen_sw_e032_half, a_nc, b_nc)
+    muls_nc, adds_nc = get_op_counts(func_nc)
+    assert muls_nc == 11
+    assert adds_nc == 6
+
+    check_same_result(func_cse, func_nc, _NUM_EVEN, _NUM_ORIGIN)
+
+
 # ---------------------------------------------------------------------------
 # Test 4: geometric product of two even elements
 # ---------------------------------------------------------------------------
@@ -230,7 +251,6 @@ def test_gp_even_even(pga3d, pga3d_no_cse):
     assert adds_nc == 40
 
     check_same_result(func_cse, func_nc, _NUM_EVEN, _NUM_EVEN_2)
-
 
 # ---------------------------------------------------------------------------
 # Tests 6-8: geometric products of specialized even elements

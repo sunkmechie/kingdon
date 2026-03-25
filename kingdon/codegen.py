@@ -675,7 +675,7 @@ def _lambdify_poly_cse(args_dict, poly_exprs, funcname, common_denom=None):
     :return: compiled function with docstring containing op counts.
     """
 
-    from kingdon.polynomial import poly_cse, _poly_format, _UNIT_POLY
+    from kingdon.polynomial import poly_cse, _poly_format
 
     # Build CSE input: numerators of all exprs, plus the common denominator as last entry.
     # poly_cse is non-destructive (copies its input), so no deepcopy needed here.
@@ -709,7 +709,7 @@ def _lambdify_poly_cse(args_dict, poly_exprs, funcname, common_denom=None):
         body_lines.append(f'    {stmt}')
 
     # Emit denominator local variable if needed (avoids recomputing it per return component)
-    if denom_simplified is not None and sum(1 for e in poly_exprs if e.denom != _UNIT_POLY) > 1:
+    if denom_simplified is not None and sum(1 for e in poly_exprs if e.denom != 1) > 1:
         prelude_names = {stmt.split('=')[0].strip() for stmt in prelude}
         denom_var = '_d'
         while denom_var in prelude_names:
@@ -720,7 +720,7 @@ def _lambdify_poly_cse(args_dict, poly_exprs, funcname, common_denom=None):
         denom_ref = _poly_format(denom_simplified) if denom_simplified is not None else None
 
     ret_parts = [
-        _poly_format(simp) if (denom_ref is None or e.denom == _UNIT_POLY)
+        _poly_format(simp) if (denom_ref is None or e.denom == 1)
         else f'({_poly_format(simp)})/({denom_ref})'
         for e, simp in zip(poly_exprs, numer_simplified)
     ]
@@ -758,8 +758,11 @@ def lambdify(args: dict, exprs: list, funcname: str, dependencies: tuple = None,
             [b, b1, b2, b12] = B
             return (+a1*b2-a2*b1,)
 
-    It is recommended not to call this function directly, but rather to use
-    :func:`do_codegen` which provides a clean API around this function.
+    .. note::
+        As a `kingdon` end user, you should probably not need to call this functon directly,
+        be sure to check out :meth:`~kingdon.Algebra.register` first.
+        And even for experienced users or `kingdon` developers it is recommended
+        to use :func:`do_codegen` which provides a clean API around this function.
 
     :param args: dictionary of type dict[str | Symbol, tuple[Symbol]].
     :param exprs: tuple[Expr]
@@ -774,15 +777,12 @@ def lambdify(args: dict, exprs: list, funcname: str, dependencies: tuple = None,
     """
     # Try polynomial CSE before sympy conversion (faster and more targeted)
     if cse and dependencies is None and exprs:
-        try:
-            from kingdon.polynomial import RationalPolynomial, _UNIT_POLY
-            if all(isinstance(e, RationalPolynomial) for e in exprs):
-                non_unit = [e for e in exprs if e.denom != _UNIT_POLY]
-                if not non_unit or all(e.denom == non_unit[0].denom for e in non_unit):
-                    common_denom = non_unit[0].denom if non_unit else None
-                    return _lambdify_poly_cse(args, exprs, funcname, common_denom=common_denom)
-        except Exception as e:
-            warnings.warn(f"polynomial CSE failed: {e}", stacklevel=2)
+        from kingdon.polynomial import RationalPolynomial
+        if all(isinstance(e, RationalPolynomial) for e in exprs):
+            non_unit = [e for e in exprs if e.denom != 1]
+            if not non_unit or all(e.denom == non_unit[0].denom for e in non_unit):
+                common_denom = non_unit[0].denom if non_unit else None
+                return _lambdify_poly_cse(args, exprs, funcname, common_denom=common_denom)
 
     if printer is LambdaPrinter:
         printer = LambdaPrinter(
