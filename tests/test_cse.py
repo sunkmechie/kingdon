@@ -149,7 +149,7 @@ def pga3d_no_cse():
 
 
 # ---------------------------------------------------------------------------
-# Tests 1-3: sandwich product of even element with various trivectors
+# Tests 1-4: sandwich product of even element with various trivectors
 # ---------------------------------------------------------------------------
 
 def test_sw_even_normalized_point(pga3d, pga3d_no_cse):
@@ -253,7 +253,7 @@ def test_gp_even_even(pga3d, pga3d_no_cse):
     check_same_result(func_cse, func_nc, _NUM_EVEN, _NUM_EVEN_2)
 
 # ---------------------------------------------------------------------------
-# Tests 6-8: geometric products of specialized even elements
+# Tests 5-8: geometric products of specialized even elements
 # ---------------------------------------------------------------------------
 
 def test_gp_even_translation(pga3d, pga3d_no_cse):
