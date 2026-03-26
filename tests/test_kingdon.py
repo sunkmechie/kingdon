@@ -460,8 +460,10 @@ def test_conjugation():
         x >> y
 
     x = alg.evenmv(name='x')
-    # Check if the built-in conjugation formula is what we expect it to be.
-    xconjy_expected = x * y * ~x
+    # GAmphetamine sw formula for even versors: grade(x*y*~x + y*(1 - grade(x*~x, 0)), grade(y))
+    # For normalized x (x*~x = 1 scalar), the correction term vanishes and this reduces to x*y*~x.
+    axar_scalar = (x * ~x).grade(0)
+    xconjy_expected = sum((x * y.grade(g) * ~x + y.grade(g) * (1 - axar_scalar)).grade(g) for g in y.grades)
     xconjy = x >> y
     diff = (xconjy_expected - xconjy)
     assert not diff
