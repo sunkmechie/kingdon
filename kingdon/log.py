@@ -1,6 +1,5 @@
 import cmath
 import math
-import numpy as np
 
 from sympy import Expr, Integer, Piecewise
 from sympy import atanh as sympy_atanh
@@ -15,14 +14,26 @@ def _truthy(value):
 def _is_complex_value(value):
     if isinstance(value, Expr):
         return value.is_real is False
-    return np.iscomplexobj(value)
+    if isinstance(value, complex):
+        return True
+    try:
+        import numpy as np
+        return np.iscomplexobj(value)
+    except ImportError:
+        return False
 
 
 def _is_negative_real(value):
     if isinstance(value, Expr):
         return value.is_real and value.is_negative
-    if np.iscomplexobj(value):
-        return _truthy((value.imag == 0) & (value.real < 0))
+    if isinstance(value, complex):
+        return value.imag == 0 and value.real < 0
+    try:
+        import numpy as np
+        if np.iscomplexobj(value):
+            return _truthy((value.imag == 0) & (value.real < 0))
+    except ImportError:
+        pass
     return _truthy(value < 0)
 
 
@@ -151,7 +162,12 @@ def _evaluate_branches(*inputs, mask_circular=False, mask_hyperbolic=False, mask
             if len(inputs) > 1 and not (hasattr(sample_val, "shape") and sample_val.shape != ()):
                 sample_val = inputs[1]
 
-            res = np.zeros_like(sample_mask, dtype=float) if np is not None and hasattr(sample_mask, "shape") else 0 * sample_val
+            
+            try:
+                import numpy as np
+                res = np.zeros_like(sample_mask, dtype=float) if hasattr(sample_mask, "shape") else 0 * sample_val
+            except ImportError:
+                res = 0 * sample_val
             
             if mask_any_circ:
                 sliced_inputs = [val[mask_circular] if hasattr(val, "shape") and val.shape != () else val for val in inputs]
@@ -203,6 +219,7 @@ def get_default_log_helpers(*, square, scalar, symbolic, array_valued):
         return sqrt, arctanh2
 
     if array_valued:
+        import numpy as np
         if complex_valued:
             return np.sqrt, lambda y, x: np.arctanh(y / x)
         
@@ -270,7 +287,7 @@ def compute_log_coefficient(
         coefficient = 0 * sample
         
         # Identify the null branch universally using magnitude tolerance.
-        mask_zero = np.abs(root) < eps
+        mask_zero = abs(root) < eps
         mask_nonzero = ~mask_zero
 
         if mask_nonzero.any():
@@ -283,7 +300,7 @@ def compute_log_coefficient(
         return coefficient
 
     # Pure scalar fallback
-    if np.abs(root) < eps:
+    if abs(root) < eps:
         if _is_negative_real(scalar):
             raise ValueError('The principal logarithm is undefined for negative real scalars.')
         return 1 / scalar
