@@ -1,10 +1,12 @@
 import cmath
 import math
 
-from sympy import Expr, Integer, Piecewise
+from sympy import Expr, Integer, Piecewise, Ne
 from sympy import atanh as sympy_atanh
 from sympy import atan2 as sympy_atan2
 from sympy import sqrt as sympy_sqrt
+
+__all__ = ['log']
 
 
 def _truthy(value):
@@ -139,65 +141,10 @@ def classify_bivector_square(square, *, symbolic, array_valued):
     )
 
 
-def _evaluate_branches(*inputs, mask_circular=False, mask_hyperbolic=False, mask_null=False,
-                       func_circular, func_hyperbolic, zero):
-    """Unified branching logic for evaluating math on piecewise geometric regions.
-
-    * ``inputs`` – scalar or array values to pass to the branch functions.
-    * ``func_circular`` – function to map over the circular branch.
-    * ``func_hyperbolic`` – function to map over the hyperbolic branch.
-    * ``zero`` – fallback scalar or array for the null branch.
-    The function automatically detects array masks and unpacks ``*inputs`` efficiently.
-    """
-    # Array case – masks are array‑like objects with ``any``.
-    if hasattr(mask_circular, "any") or hasattr(mask_hyperbolic, "any"):
-        mask_any_circ = mask_circular.any() if hasattr(mask_circular, "any") else mask_circular
-        mask_any_hyp = mask_hyperbolic.any() if hasattr(mask_hyperbolic, "any") else mask_hyperbolic
-        
-        if mask_any_circ or mask_any_hyp:
-            sample_mask = mask_circular if hasattr(mask_circular, "shape") else mask_hyperbolic
-            
-            # Select an array sample for dtype/shape inferencing if present.
-            sample_val = inputs[0] if inputs else None
-            if len(inputs) > 1 and not (hasattr(sample_val, "shape") and sample_val.shape != ()):
-                sample_val = inputs[1]
-
-            
-            try:
-                import numpy as np
-                res = np.zeros_like(sample_mask, dtype=float) if hasattr(sample_mask, "shape") else 0 * sample_val
-            except ImportError:
-                res = 0 * sample_val
-            
-            if mask_any_circ:
-                sliced_inputs = [val[mask_circular] if hasattr(val, "shape") and val.shape != () else val for val in inputs]
-                res[mask_circular] = func_circular(*sliced_inputs)
-            if mask_any_hyp:
-                sliced_inputs = [val[mask_hyperbolic] if hasattr(val, "shape") and val.shape != () else val for val in inputs]
-                res[mask_hyperbolic] = func_hyperbolic(*sliced_inputs)
-            return res
-
-    # Scalar (or mask is a plain bool)
-    if mask_circular:
-        return func_circular(*inputs)
-    if mask_hyperbolic:
-        return func_hyperbolic(*inputs)
-    return zero
-
-# ---------------------------------------------------------------------
-# Helper factories for each backend – now thin wrappers around the common
-# implementations defined above.
-# ---------------------------------------------------------------------
-
-# sqrt backend factory removed – inline lambda will be defined in get_default_log_helpers.
-
+# Helper factories for each backend
 
 def get_default_log_helpers(*, square, scalar, symbolic, array_valued):
-    """Return the default sqrt and arctanh2 helpers for the active backend.
-
-    The function returns thin lambda wrappers that delegate to the 
-    ``_evaluate_branches`` utility defined at the top of the file.
-    """
+    """Return the default sqrt and arctanh2 helpers for the active backend."""
     complex_valued = _is_complex_value(square) or _is_complex_value(scalar)
 
     if symbolic:
@@ -223,28 +170,52 @@ def get_default_log_helpers(*, square, scalar, symbolic, array_valued):
         if complex_valued:
             return np.sqrt, lambda y, x: np.arctanh(y / x)
         
-        sqrt = lambda x, **kwargs: _evaluate_branches(
-            x, **kwargs,
-            func_circular=lambda v: np.sqrt(-v), func_hyperbolic=np.sqrt, zero=0 * x
-        )
-        arctanh2 = lambda y, x, **kwargs: _evaluate_branches(
-            y, x, **kwargs,
-            func_circular=np.arctan2, func_hyperbolic=lambda y_val, x_val: np.arctanh(y_val / x_val), zero=0 * (x if hasattr(x, "shape") and x.shape != () else y)
-        )
+        def sqrt(x, *, mask_circular=False, mask_hyperbolic=False, mask_null=False):
+            res = np.zeros_like(x, dtype=float)
+            x_is_array = hasattr(x, "shape") and x.shape != ()
+            if mask_circular.any():
+                xc = x[mask_circular] if x_is_array else x
+                res[mask_circular] = np.sqrt(-xc)
+            if mask_hyperbolic.any():
+                xh = x[mask_hyperbolic] if x_is_array else x
+                res[mask_hyperbolic] = np.sqrt(xh)
+            return res
+
+        def arctanh2(y, x, *, mask_circular=False, mask_hyperbolic=False, mask_null=False):
+            sample_val = x if hasattr(x, "shape") and x.shape != () else y
+            res = np.zeros_like(sample_val, dtype=float)
+            x_is_array = hasattr(x, "shape") and x.shape != ()
+            y_is_array = hasattr(y, "shape") and y.shape != ()
+            if mask_circular.any():
+                xc = x[mask_circular] if x_is_array else x
+                yc = y[mask_circular] if y_is_array else y
+                res[mask_circular] = np.arctan2(yc, xc)
+            if mask_hyperbolic.any():
+                xh = x[mask_hyperbolic] if x_is_array else x
+                yh = y[mask_hyperbolic] if y_is_array else y
+                res[mask_hyperbolic] = np.arctanh(yh / xh)
+            return res
+            
         return sqrt, arctanh2
 
     if complex_valued:
         return (lambda x: x ** 0.5), (lambda y, x: cmath.atanh(y / x))
 
     # Fallback to scalar ``math`` backend.
-    sqrt = lambda x, **kwargs: _evaluate_branches(
-        x, **kwargs,
-        func_circular=lambda v: math.sqrt(-v), func_hyperbolic=math.sqrt, zero=0.0
-    )
-    arctanh2 = lambda y, x, **kwargs: _evaluate_branches(
-        y, x, **kwargs,
-        func_circular=math.atan2, func_hyperbolic=lambda y_val, x_val: math.atanh(y_val / x_val), zero=0.0
-    )
+    def sqrt(x, *, mask_circular=False, mask_hyperbolic=False, mask_null=False):
+        if mask_circular:
+            return math.sqrt(-x)
+        if mask_hyperbolic:
+            return math.sqrt(x)
+        return 0.0
+
+    def arctanh2(y, x, *, mask_circular=False, mask_hyperbolic=False, mask_null=False):
+        if mask_circular:
+            return math.atan2(y, x)
+        if mask_hyperbolic:
+            return math.atanh(y / x)
+        return 0.0
+
     return sqrt, arctanh2
 
 
@@ -265,6 +236,8 @@ def compute_log_coefficient(
     if complex_valued:
         root = sqrt(bivector_square)
         angle = arctanh2(root, scalar)
+        if symbolic:
+            return Piecewise((angle / root, Ne(root, 0)), (Integer(1) / scalar, True))
     else:
         branch_masks = classify_bivector_square(bivector_square, symbolic=symbolic, array_valued=array_valued)
         if custom_helpers:
@@ -282,6 +255,8 @@ def compute_log_coefficient(
             )
 
     eps = 1e-12
+    # log() evaluates `angle / root` division. We use `eps` tolerance (unlike exp() which 
+    # allows 0 naturally) because a noisy division by near-zero explodes to infinity.
     if array_valued:
         sample = scalar if scalar_is_array else root
         coefficient = 0 * sample
