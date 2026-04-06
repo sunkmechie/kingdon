@@ -248,60 +248,44 @@ def compute_log_coefficient(
     if complex_valued:
         root = sqrt(bivector_square)
         angle = arctanh2(root, scalar)
-
-        # Tolerance for floating‑point zero detection (helps when B² is numerically tiny).
-        eps = 1e-12
-        if array_valued:
-            sample = scalar if scalar_is_array else root
-            coefficient = 0 * sample
-            # Use a tolerance instead of exact equality.
-            mask_zero = np.abs(root) < eps
-            mask_nonzero = ~mask_zero
-            if mask_nonzero.any():
-                coefficient[mask_nonzero] = angle[mask_nonzero] / root[mask_nonzero]
-            if mask_zero.any():
-                scalar_zero = scalar[mask_zero] if scalar_is_array else scalar
-                if _is_negative_real(scalar_zero):
-                    raise ValueError('The principal logarithm is undefined for negative real scalars.')
-                coefficient[mask_zero] = 1 / scalar_zero
-            return coefficient
-        # Scalar (non‑array) path – use absolute tolerance.
-        if np.abs(root) < eps:
-            if _is_negative_real(scalar):
-                raise ValueError('The principal logarithm is undefined for negative real scalars.')
-            return 1 / scalar
-        return angle / root
-
-    branch_masks = classify_bivector_square(bivector_square, symbolic=symbolic, array_valued=array_valued)
-    if custom_helpers:
-        root = sqrt(bivector_square)
-        angle = arctanh2(root, scalar)
     else:
-        root = sqrt(bivector_square, **branch_masks)
-        angle = arctanh2(root, scalar, **branch_masks)
+        branch_masks = classify_bivector_square(bivector_square, symbolic=symbolic, array_valued=array_valued)
+        if custom_helpers:
+            root = sqrt(bivector_square)
+            angle = arctanh2(root, scalar)
+        else:
+            root = sqrt(bivector_square, **branch_masks)
+            angle = arctanh2(root, scalar, **branch_masks)
 
-    if symbolic:
-        return Piecewise(
-            (angle / root, branch_masks['mask_circular']),
-            (angle / root, branch_masks['mask_hyperbolic']),
-            (Integer(1) / scalar, True),
-        )
+        if symbolic:
+            return Piecewise(
+                (angle / root, branch_masks['mask_circular']),
+                (angle / root, branch_masks['mask_hyperbolic']),
+                (Integer(1) / scalar, True),
+            )
 
+    eps = 1e-12
     if array_valued:
         sample = scalar if scalar_is_array else root
         coefficient = 0 * sample
-        mask_nonnull = branch_masks['mask_circular'] | branch_masks['mask_hyperbolic']
-        if mask_nonnull.any():
-            coefficient[mask_nonnull] = angle[mask_nonnull] / root[mask_nonnull]
-        if branch_masks['mask_null'].any():
-            scalar_null = scalar[branch_masks['mask_null']] if scalar_is_array else scalar
-            if _is_negative_real(scalar_null):
+        
+        # Identify the null branch universally using magnitude tolerance.
+        mask_zero = np.abs(root) < eps
+        mask_nonzero = ~mask_zero
+
+        if mask_nonzero.any():
+            coefficient[mask_nonzero] = angle[mask_nonzero] / root[mask_nonzero]
+        if mask_zero.any():
+            scalar_zero = scalar[mask_zero] if scalar_is_array else scalar
+            if _is_negative_real(scalar_zero):
                 raise ValueError('The principal logarithm is undefined for negative real scalars.')
-            coefficient[branch_masks['mask_null']] = 1 / scalar_null
+            coefficient[mask_zero] = 1 / scalar_zero
         return coefficient
 
-    if branch_masks['mask_null']:
+    # Pure scalar fallback
+    if np.abs(root) < eps:
         if _is_negative_real(scalar):
             raise ValueError('The principal logarithm is undefined for negative real scalars.')
         return 1 / scalar
+        
     return angle / root
