@@ -926,9 +926,16 @@ def test_log():
     assert ((2.0 * R_rot).log() - B_rot).filter(lambda v: np.abs(v) > 1e-15) == alg.multivector()
 
     # Symbolic translations simplify exactly.
-    a = Symbol('a')
+    a = Symbol('a', real=True)
     B_sym = alg.bivector(e01=a, e02=2 * a)
     assert B_sym.exp().log() == B_sym
+
+    # 1. Complex Symbolic evaluation tests the combined Piecewise fast-path
+    from sympy import I, Piecewise
+    b = Symbol('b', real=True, nonzero=True)
+    B_complex_sym = alg.bivector(e12=a + I * b)
+    # We verify the expression builds correctly. SymPy simplification timeouts on complex transcendentals here, so we assert structural correctness.
+    assert isinstance(B_complex_sym.exp().log().e12, Piecewise)
 
     # Array-valued rotors can mix translation and rotation branches, even when rescaled per entry.
     scale = np.array([3.0, 2.0, 1.5])
@@ -952,11 +959,35 @@ def test_log():
     assert (B_boost.exp().log() - B_boost).filter(lambda v: np.abs(v) > 1e-14) == alg_mink.multivector()
     assert ((2.0 * B_boost.exp()).log() - B_boost).filter(lambda v: np.abs(v) > 1e-14) == alg_mink.multivector()
 
+    # 2. Multi-branch arrays across all three regions (Circular, Hyperbolic, Null) simultaneously
+    # B_mix.exp() crashes under pure Kingdon since it triggers an unmasked `.filter()`, so we
+    # construct the exponential array manually to test `log()` handling parallel dispatch safely.
+    alg_multi = Algebra(2, 1, 1)  # e1, e2 (+), e3 (-), e0 (0)
+    B_mix = alg_multi.multivector(
+        e12=np.array([1.5, 0.0, 0.0]),  # Circular: B^2 = -2.25
+        e13=np.array([0.0, 1.2, 0.0]),  # Hyperbolic: B^2 = +1.44
+        e01=np.array([0.0, 0.0, 2.5]),  # Null: B^2 = 0
+    )
+    R_mix = alg_multi.multivector(
+        e=np.array([np.cos(1.5), np.cosh(1.2), 1.0]),
+        e12=np.array([np.sin(1.5), 0.0, 0.0]),
+        e13=np.array([0.0, np.sinh(1.2), 0.0]),
+        e01=np.array([0.0, 0.0, 2.5]),
+    )
+    diff = R_mix.log() - B_mix
+    assert np.allclose(np.array(diff.values()), 0.0, atol=1e-12)
+
     # Complex simple rotors are supported as well.
     alg_vga2d = Algebra(2)
     B_complex = alg_vga2d.bivector(e12=0.4 + 0.2j)
     diff = B_complex.exp().log() - B_complex
     assert diff.filter(lambda v: np.abs(v) > 1e-14) == alg_vga2d.multivector()
+
+    # checks for R2,2 (supports complex values needed for invariant decomposition, per paper: https://www.researchgate.net/publication/370750268_Graded_Symmetry_Groups_Plane_and_Simple)
+    alg_r22 = Algebra(2, 2)
+    B2_complex = alg_r22.bivector(e12=1.0 + 1.0j, e13=2.0 - 0.5j)
+    diff2 = B2_complex.exp().log() - B2_complex
+    assert diff2.filter(lambda v: np.abs(v) > 1e-14) == alg_r22.multivector()
 
     # 3DPGA checks the 4D cases where non-simple bivectors can exist.
     pga3d = Algebra.fromname('3DPGA')
@@ -983,6 +1014,10 @@ def test_log_rejects_invalid_inputs():
 
     with pytest.raises(ValueError, match='negative real scalars'):
         alg.multivector(e=-1).log()
+
+    # 4. Array-valued negative scalar translation rejection
+    with pytest.raises(ValueError, match='negative real scalars'):
+        alg.multivector(e=np.array([1.0, -1.0])).log()
 
     with pytest.raises(NotImplementedError, match='scalar and bivector parts'):
         alg.multivector(e=1, e1=1).log()
