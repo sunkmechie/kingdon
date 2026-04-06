@@ -15,21 +15,14 @@ def _truthy(value):
 def _is_complex_value(value):
     if isinstance(value, Expr):
         return value.is_real is False
-    if isinstance(value, complex):
-        return True
-
     return np.iscomplexobj(value)
 
 
 def _is_negative_real(value):
     if isinstance(value, Expr):
         return value.is_real and value.is_negative
-    if isinstance(value, complex):
-        return value.imag == 0 and value.real < 0
-
     if np.iscomplexobj(value):
         return _truthy((value.imag == 0) & (value.real < 0))
-
     return _truthy(value < 0)
 
 
