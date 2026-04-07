@@ -47,7 +47,7 @@ def log(rotor, *, arctanh2=None, sqrt=None):
 
     Works for python float, int and complex dtypes, numpy arrays, and for symbolic expressions using sympy.
     For more control, it is possible to explicitly provide `arctanh2` and `sqrt` functions.
-    If you provide one, you must provide both.
+    If you provide, you must provide both.
 
     If the coefficients are array-valued, custom `sqrt` and `arctanh2` functions can optionally
     accept the keyword masks `mask_circular`, `mask_hyperbolic`, and `mask_null`.
@@ -56,8 +56,8 @@ def log(rotor, *, arctanh2=None, sqrt=None):
     is the bivector part of the rotor.
 
     **Numerical tolerance** – when the bivector square is numerically close to zero we treat it as
-    zero using an absolute tolerance of ``1e-12`` (scaled by the magnitude of the scalar when
-    appropriate). This avoids division‑by‑tiny‑numbers for near‑null rotors.
+    zero using an absolute tolerance of ``1e-12``. This avoids division-by-tiny-numbers
+    for near-null rotors which mathematically evaluate to the limit :math:`1/\langle R \rangle_0`.
     """
     funcs = (arctanh2, sqrt)
     if any(func is None for func in funcs) and any(func is not None for func in funcs):
@@ -141,8 +141,6 @@ def classify_bivector_square(square, *, symbolic, array_valued):
     )
 
 
-# Helper factories for each backend
-
 def get_default_log_helpers(*, square, scalar, symbolic, array_valued):
     """Return the default sqrt and arctanh2 helpers for the active backend."""
     complex_valued = _is_complex_value(square) or _is_complex_value(scalar)
@@ -150,7 +148,7 @@ def get_default_log_helpers(*, square, scalar, symbolic, array_valued):
     if symbolic:
         if complex_valued:
             return sympy_sqrt, lambda y, x: sympy_atanh(y / x)
-        # Symbolic branch uses Piecewise directly – keep as‑is.
+        # Symbolic branch uses Piecewise directly
         def sqrt(x, *, mask_circular=False, mask_hyperbolic=False, mask_null=False):
             return Piecewise(
                 (sympy_sqrt(-x), mask_circular),
@@ -255,8 +253,7 @@ def compute_log_coefficient(
             )
 
     eps = 1e-12
-    # log() evaluates `angle / root` division. We use `eps` tolerance (unlike exp() which 
-    # allows 0 naturally) because a noisy division by near-zero explodes to infinity.
+    # log() evaluates `angle / root` division. We use `eps` tolerance because a noisy division by near-zero explodes to infinity.
     if array_valued:
         sample = scalar if scalar_is_array else root
         coefficient = 0 * sample

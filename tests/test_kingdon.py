@@ -9,7 +9,7 @@ from dataclasses import replace
 import pytest
 import numpy as np
 
-from sympy import Symbol, expand, sympify, cos, sin, sinc
+from sympy import Symbol, expand, sympify, cos, sin, sinc, I, Piecewise
 from kingdon import Algebra, MultiVector, symbols
 from kingdon.operator_dict import UnaryOperatorDict
 
@@ -930,11 +930,10 @@ def test_log():
     B_sym = alg.bivector(e01=a, e02=2 * a)
     assert B_sym.exp().log() == B_sym
 
-    # 1. Complex Symbolic evaluation tests the combined Piecewise fast-path
-    from sympy import I, Piecewise
+    # Complex Symbolic evaluation tests the combined Piecewise fast-path
     b = Symbol('b', real=True, nonzero=True)
     B_complex_sym = alg.bivector(e12=a + I * b)
-    # We verify the expression builds correctly. SymPy simplification timeouts on complex transcendentals here, so we assert structural correctness.
+    # We verify the expression builds correctly. 
     assert isinstance(B_complex_sym.exp().log().e12, Piecewise)
 
     # Array-valued rotors can mix translation and rotation branches, even when rescaled per entry.
@@ -959,10 +958,10 @@ def test_log():
     assert (B_boost.exp().log() - B_boost).filter(lambda v: np.abs(v) > 1e-14) == alg_mink.multivector()
     assert ((2.0 * B_boost.exp()).log() - B_boost).filter(lambda v: np.abs(v) > 1e-14) == alg_mink.multivector()
 
-    # 2. Multi-branch arrays across all three regions (Circular, Hyperbolic, Null) simultaneously
-    # B_mix.exp() crashes under pure Kingdon since it triggers an unmasked `.filter()`, so we
-    # construct the exponential array manually to test `log()` handling parallel dispatch safely.
-    alg_multi = Algebra(2, 1, 1)  # e1, e2 (+), e3 (-), e0 (0)
+    # Multi-branch arrays across all three regions (Circular, Hyperbolic, Null) simultaneously
+    # B_mix.exp() crashes since it triggers an unmasked `.filter()`, so we
+    # construct the exponential array manually to test `log()` handling parallel cases
+    alg_multi = Algebra(2, 1, 1)  
     B_mix = alg_multi.multivector(
         e12=np.array([1.5, 0.0, 0.0]),  # Circular: B^2 = -2.25
         e13=np.array([0.0, 1.2, 0.0]),  # Hyperbolic: B^2 = +1.44
@@ -1015,7 +1014,7 @@ def test_log_rejects_invalid_inputs():
     with pytest.raises(ValueError, match='negative real scalars'):
         alg.multivector(e=-1).log()
 
-    # 4. Array-valued negative scalar translation rejection
+    # Array-valued negative scalar translation rejection
     with pytest.raises(ValueError, match='negative real scalars'):
         alg.multivector(e=np.array([1.0, -1.0])).log()
 
